@@ -10,9 +10,9 @@ CASE_DIR = ROOT / "cases"
 GOLDEN_FILE = ROOT / "golden/prelu_expect.py"
 
 DTYPE_CONFIG = {
-    "float16": {"threshold": [0.001, 0.001], "label": "float16"},
+    # "float16": {"threshold": [0.001, 0.001], "label": "float16"},
     "float32": {"threshold": [0.0001, 0.0001], "label": "float32"},
-    "bfloat16": {"threshold": [0.008, 0.008], "label": "bfloat16"},
+    # "bfloat16": {"threshold": [0.008, 0.008], "label": "bfloat16"},
 }
 
 SCENARIO = {

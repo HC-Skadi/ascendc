@@ -76,3 +76,5 @@ build_out/
 output/
 input/
 cases/
+result.csv
+aclnn_*_perf/
