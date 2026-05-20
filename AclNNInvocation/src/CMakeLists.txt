@@ -21,7 +21,7 @@ else ()
     message(STATUS "env INC_PATH: ${INC_PATH}")
 endif()
 
-set(CUST_PKG_PATH "${INC_PATH}/opp/vendors/prelu_nn/op_api")
+set(CUST_PKG_PATH "${INC_PATH}/opp/vendors/prelu_custom/op_api")
 
 set(LIB_PATH $ENV{NPU_HOST_LIB})
 
