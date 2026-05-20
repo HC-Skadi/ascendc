@@ -1,0 +1,23 @@
+{
+  "skill_name": "ascend-skills-eval",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "优化所有昇腾skills",
+      "expected_output": "应该扫描所有昇腾相关skills，进行评估和优化",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "评估 ascend-npu-verifier 的质量并给出分数",
+      "expected_output": "应该读取SKILL.md，进行8维度评分，输出结构评分和效果评分",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "用NPU实测验证 ascend-model-scanner",
+      "expected_output": "应该先检查npu-smi info，在真实NPU上运行skill中的关键命令",
+      "files": []
+    }
+  ]
+}

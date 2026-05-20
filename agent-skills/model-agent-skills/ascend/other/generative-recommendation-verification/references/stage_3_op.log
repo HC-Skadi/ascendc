@@ -1,0 +1,28 @@
+[0;32m[INFO][0m === 算子编译验证 ===
+[0;32m[INFO][0m 工作目录: .
+[0;32m[INFO][0m 日志文件: stage_3_op.log
+[0;32m[INFO][0m 检查1: 验证 Python 环境...
+[0;32m[INFO][0m ✓ torch_npu 可用
+[0;32m[INFO][0m 检查2: 验证 libhstu_dense_ops.so...
+[0;31m[ERROR][0m ✗ libhstu_dense_ops.so 未找到
+[0;32m[INFO][0m   搜索路径:
+[0;32m[INFO][0m     - /usr/local/Ascend/opp/...
+[0;32m[INFO][0m     - /usr/local/Ascend/ascend-toolkit/...
+[0;32m[INFO][0m     - $WORKDIR/
+[0;32m[INFO][0m 检查3: 验证 gcc 版本...
+[0;32m[INFO][0m ✓ gcc 版本: 11.4.0
+22.04.3
+11.4.0
+[0;32m[INFO][0m   ✓ gcc 版本符合建议 (≥10.2.0)
+[0;32m[INFO][0m 检查4: 验证算子 Python 模块...
+[0;32m[INFO][0m ✓ 算子模块检查完成
+[0;32m[INFO][0m 检查5: 动态库加载测试...
+[0;32m[INFO][0m 检查6: 算子注册检查...
+torch_npu扩展正常
+custom_ops模块不可用
+[0;32m[INFO][0m ✓ 算子注册检查完成
+[0;32m[INFO][0m 
+[0;32m[INFO][0m === 验证总结 ===
+[0;32m[INFO][0m 驱动路径: /usr/local/Ascend/driver
+[0;32m[INFO][0m 动态库: 未找到
+[0;31m[ERROR][0m ✗ 发现 1 个错误，请检查上述日志

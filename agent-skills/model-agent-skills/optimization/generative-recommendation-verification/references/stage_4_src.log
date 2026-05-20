@@ -1,0 +1,28 @@
+[INFO] === 源码与数据准备验证 ===
+[INFO] 工作目录: /home/jiaozeyu/generative/memgen-gr
+[INFO] 日志文件: stage_4_src.log
+[INFO] 检查: 工作目录结构...
+[WARN]   ⚠ RecSDK/ 不存在
+[WARN]   ⚠ generative-recommenders/ 不存在
+[INFO] 检查: RecSDK 仓库...
+[ERROR] ✗ RecSDK 仓库不存在: /home/jiaozeyu/generative/memgen-gr/RecSDK
+[INFO] 检查: generative-recommenders 源码...
+[ERROR] ✗ generative-recommenders 源码不存在: /home/jiaozeyu/generative/memgen-gr/generative-recommenders
+[INFO] 检查: preprocess_public_data.py...
+[WARN] ⚠ preprocess_public_data.py 未找到（可能已预处理或在其他位置）
+[INFO] 检查: ml-1m 数据集...
+[ERROR] ✗ ml-1m 数据集未找到或文件不完整
+[INFO]   期望文件: train.csv, test.csv, item.csv
+[INFO]   搜索路径:
+[INFO]     - /home/jiaozeyu/generative/memgen-gr/data/ml-1m
+[INFO]     - /home/jiaozeyu/generative/memgen-gr/ml-1m
+[INFO]     - /home/jiaozeyu/generative/memgen-gr/RecSDK/data/ml-1m
+[INFO]     - ml-1m
+[INFO] 
+[INFO] === 验证总结 ===
+[INFO]   ✓ 工作目录结构
+[INFO]   ✗ RecSDK仓库
+[INFO]   ✗ generative-recommenders
+[INFO]   ✓ 预处理脚本
+[INFO]   ✗ ml-1m数据集
+[WARN] ⚠ 部分检查有问题 (2/5)

@@ -1,0 +1,117 @@
+{
+  "skill_name": "generative-recommendation-verification",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "验证一下我们部署在Atlas 800 A2上的生成式推荐模型环境，运行完整的8阶段验证流程",
+      "expected_output": "执行所有验证阶段，生成report.json和report.md，包含各阶段通过/失败状态",
+      "files": [],
+      "assertions": [
+        {
+          "type": "file_exists",
+          "path": "verification_report/report.json",
+          "description": "生成JSON格式报告"
+        },
+        {
+          "type": "file_exists",
+          "path": "verification_report/report.md",
+          "description": "生成Markdown格式报告"
+        },
+        {
+          "type": "json_contains",
+          "path": "verification_report/report.json",
+          "key": "stages",
+          "description": "报告包含所有8个验证阶段"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "检查HSTU模型算子是否正确编译，需要验证libhstu_dense_ops.so和6个mxrec适配算子",
+      "expected_output": "返回算子检查结果，包括libhstu_dense_ops.so状态和6个适配算子安装状态",
+      "files": [],
+      "assertions": [
+        {
+          "type": "file_exists",
+          "path": "stage_3_op.log",
+          "description": "生成算子验证日志"
+        },
+        {
+          "type": "log_contains",
+          "path": "stage_3_op.log",
+          "pattern": "libhstu_dense_ops.so",
+          "description": "日志包含动态库检查结果"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "运行阶段5的配置参数验证，检查hstu-mt-3400.gin文件中的dqk、dv参数是否为16的整数倍",
+      "expected_output": "返回配置验证结果，指出参数是否符合要求",
+      "files": ["configs/ml-1m/hstu-mt-3400.gin"],
+      "assertions": [
+        {
+          "type": "file_exists",
+          "path": "stage_5_cfg.log",
+          "description": "生成配置验证日志"
+        },
+        {
+          "type": "log_contains",
+          "path": "stage_5_cfg.log",
+          "pattern": "dqk.*16",
+          "description": "验证dqk参数"
+        },
+        {
+          "type": "log_contains",
+          "path": "stage_5_cfg.log",
+          "pattern": "dv.*16",
+          "description": "验证dv参数"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "我的RecSDK仓库在/home/jiaozeyu/RecSDK，帮我检查源码和数据是否准备好，特别是branch和ml-1m数据集",
+      "expected_output": "返回源码仓库分支状态和数据集准备情况",
+      "files": [],
+      "assertions": [
+        {
+          "type": "file_exists",
+          "path": "stage_4_src.log",
+          "description": "生成源码验证日志"
+        },
+        {
+          "type": "log_contains",
+          "path": "stage_4_src.log",
+          "pattern": "RecSDK",
+          "description": "检查RecSDK仓库"
+        },
+        {
+          "type": "log_contains",
+          "path": "stage_4_src.log",
+          "pattern": "ml-1m",
+          "description": "检查数据集"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "在NPU 0上启动训练验证，使用hstu-mt-3400.gin配置，检查是否能正常启动且无OOM错误",
+      "expected_output": "训练启动成功日志，无OOM错误提示",
+      "files": [],
+      "assertions": [
+        {
+          "type": "file_exists",
+          "path": "stage_6_train.log",
+          "description": "生成训练启动日志"
+        },
+        {
+          "type": "log_not_contains",
+          "path": "stage_6_train.log",
+          "pattern": "out of memory|oom",
+          "description": "无OOM错误"
+        }
+      ]
+    }
+  ]
+}

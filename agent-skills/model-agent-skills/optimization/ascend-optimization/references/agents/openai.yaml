@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "Ascend Optimization"
+  short_description: "Generic Ascend tuning with project workflow handoff"
+  default_prompt: "Use $ascend-optimization to optimize generic Ascend PyTorch inference code with torch_npu operator affinity, CPU affinity, runtime, and memory tuning. When the repo already includes model_files, accuracy_run.py, accuracy_run_perf.py, check_accuracy_run_perf.py, or project-specific acceptance flow, also reference the sibling skill at ../ascend-affinity-operator/SKILL.md for workflow and validation."

@@ -1,0 +1,1 @@
+../../add_example/examples/test_aclnn_add_example.cpp

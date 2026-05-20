@@ -1,0 +1,39 @@
+{
+  "bundle_version": "1.0",
+  "task_type": "training|inference|dump",
+  "model_name": "example-model",
+  "baseline_source": "official|user_gpu",
+  "sides": [
+    "gpu",
+    "ascend"
+  ],
+  "files": {
+    "training": {
+      "gpu": {
+        "logs": [
+          "training/gpu/logs/train.log"
+        ],
+        "metrics": [
+          "training/gpu/metrics/metrics.json"
+        ],
+        "config": [
+          "training/gpu/config/train.yaml"
+        ],
+        "run": [
+          "training/gpu/run/command.txt"
+        ]
+      },
+      "ascend": {
+        "logs": [
+          "training/ascend/logs/train.log"
+        ],
+        "metrics": [
+          "training/ascend/metrics/metrics.json"
+        ]
+      }
+    }
+  },
+  "notes": [
+    "如果官方没有基线，必须先确认用户允许读取本地 GPU 结果目录。"
+  ]
+}

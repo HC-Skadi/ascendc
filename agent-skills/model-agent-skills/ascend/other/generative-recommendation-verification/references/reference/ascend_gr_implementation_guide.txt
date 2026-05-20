@@ -1,0 +1,103 @@
+昇腾生成式推荐模型实现指南
+==============================
+
+本文档描述在华为昇腾NPU上实现生成式推荐模型的完整技术方案。
+
+1. 概述
+--------
+
+生成式推荐模型（Generative Recommender）基于HSTU（Heterogeneous Standard Transformer Unit）架构，
+专为昇腾NPU设备优化，支持融合算子加速。
+
+2. 技术架构
+-----------
+
+2.1 HSTU 核心组件
+- HSTU (Heterogeneous Standard Transformer Unit)
+- 融合算子：mxrec_opp_hstu_dense_forward/backward
+- 异步cumsum操作：mxrec_opp_asynchronous_complete_cumsum
+
+2.2 适配算子列表
+1. mxrec_opp_asynchronous_complete_cumsum - 异步累积和
+2. mxrec_opp_dense_to_jagged - 密集到稀疏转换
+3. mxrec_opp_index_select_for_rank1_backward - 索引选择反向
+4. mxrec_opp_jagged_to_padded_dense - 稀疏到密集转换
+5. mxrec_opp_gather_for_rank1 - 聚集操作
+6. mxrec_opp_hstu_dense_forward - HSTU前向传播
+7. mxrec_opp_hstu_dense_backward - HSTU反向传播
+
+3. 环境要求
+-----------
+
+3.1 硬件
+- 昇腾Atlas 800 A2/A3
+- 驱动：/usr/local/Ascend/driver
+
+3.2 软件依赖
+- Python >= 3.11
+- torch >= 2.1.0
+- torch_npu >= 2.1.0.post9
+- CANN >= 7.0
+
+3.3 环境变量
+- ASCEND_VISIBLE_DEVICES=0
+- USE_NPU_HSTU=1 (启用融合算子)
+- ENABLE_RAB=0
+- PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+4. 源码准备
+-----------
+
+4.1 RecSDK仓库
+- 克隆地址：指定仓库
+- 分支：branch_v7.0.0-POC_torch
+
+4.2 generative-recommenders
+- 源码下载
+- NPU_GR.patch补丁应用
+
+4.3 数据集
+- ml-1m预处理：preprocess_public_data.py
+
+5. 配置参数
+-----------
+
+5.1 gin配置文件要求
+- hstu_encoder.dqk: 16的整数倍
+- hstu_encoder.dv: 16的整数倍
+- train_fn.max_sequence_length: 3389
+- train_fn.local_batch_size: 32
+
+6. 性能基准
+-----------
+
+使用融合算子(USE_NPU_HSTU=1)相比非融合版本性能提升：
+- 速度：5.3x - 15.2x
+- 内存：减少约20%
+
+7. 验证流程
+-----------
+
+1. 环境基础验证
+2. 依赖安装验证
+3. 算子编译验证
+4. 源码与数据准备验证
+5. 配置参数验证
+6. 模型训练启动验证
+7. 训练过程监控验证
+8. 性能对比验证
+
+8. 故障排除
+-----------
+
+8.1 OOM错误
+- 减小local_batch_size
+- 检查PYTORCH_NPU_ALLOC_CONF设置
+
+8.2 算子加载失败
+- 检查libhstu_dense_ops.so路径
+- 验证gcc版本兼容性
+
+8.3 训练不收敛
+- 检查学习率设置
+- 验证数据预处理正确性

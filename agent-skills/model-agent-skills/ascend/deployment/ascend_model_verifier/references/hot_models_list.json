@@ -1,0 +1,15 @@
+{
+  "models": [
+    {
+      "name": "Qwen/Qwen3-0.6B",
+      "source": "modelscope",
+      "parameters": "0.6B"
+    },
+    {
+      "name": "Qwen/Qwen2.5-0.5B-Instruct",
+      "source": "huggingface",
+      "parameters": "0.5B"
+    }
+  ],
+  "last_updated": "2026-03-24T13:53:00Z"
+}

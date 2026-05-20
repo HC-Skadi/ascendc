@@ -1,0 +1,7 @@
+interface:
+  display_name: "昇腾 AI4S 精度对齐"
+  short_description: "分析昇腾上的训练、推理和 dump 精度对齐问题。"
+  default_prompt: "Use $ascend-ai4s-precision-alignment 分析这个 AI4S 模型在昇腾 NPU 上的训练、推理和 dump 精度对齐问题。"
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,24 @@
+{
+  "manifest_version": "1.0",
+  "model_name": "example-model",
+  "side": "gpu|ascend",
+  "sample_id": "sample-0001",
+  "token_range": "optional",
+  "dump_scope": "final_logits|block_12|custom",
+  "input_files": [
+    "dump/gpu/tensors/input_ids.npy"
+  ],
+  "output_files": [
+    "dump/gpu/tensors/logits.npy"
+  ],
+  "command": "python run_dump.py ...",
+  "environment": {
+    "framework": "PyTorch 2.x",
+    "driver": "record me",
+    "firmware": "record me",
+    "tool": "msprobe"
+  },
+  "notes": [
+    "记录最小可复现样本、shape、dtype 和关键环境变量。"
+  ]
+}

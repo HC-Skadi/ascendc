@@ -1,0 +1,21 @@
+{
+  "skill-name": "ascend-npu-verifier",
+  "skill-id": "ascend-npu-verifier",
+  "score-before": 72,
+  "score-after": 87,
+  "improve-1": "补充NPU不可用时的fallback流程，边界覆盖显著提升",
+  "improve-2": "将流程重组为可执行步骤，关键点加入检查与确认",
+  "improve-3": "增加测试提示覆盖，实测表现更稳定",
+  "top1-story": "从模糊描述转向可执行策略，落地性明显增强",
+  "top2-story": "结构更线性，评估和优化循环更清晰",
+  "dims": [
+    { "name": "元数据", "before": 6, "after": 8 },
+    { "name": "工作流", "before": 5, "after": 8 },
+    { "name": "边界覆盖", "before": 4, "after": 7 },
+    { "name": "检查点", "before": 6, "after": 7 },
+    { "name": "指令精度", "before": 5, "after": 9 },
+    { "name": "资源整合", "before": 7, "after": 8 },
+    { "name": "整体架构", "before": 6, "after": 8 },
+    { "name": "实测表现", "before": 5, "after": 8 }
+  ]
+}

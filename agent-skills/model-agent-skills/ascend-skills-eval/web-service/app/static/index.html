@@ -1,0 +1,1073 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>昇腾Skills-Eval在线评测</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --card: #111a33;
+      --text: #e8ecff;
+      --muted: #9aa8d1;
+      --line: #243158;
+      --brand: #5f8cff;
+      --ok: #2bb673;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Noto Sans SC", sans-serif;
+      background: radial-gradient(circle at top, #16234a 0%, var(--bg) 45%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .wrap {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 28px 16px 56px;
+    }
+    .title {
+      font-size: 28px;
+      font-weight: 800;
+      margin: 0 0 8px;
+      text-align: center;
+    }
+    .sub {
+      margin: 0 0 22px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+      text-align: center;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02));
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+    }
+    .card-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 0 0 4px;
+      color: var(--text);
+    }
+    .card-hint {
+      font-size: 12px;
+      color: var(--muted);
+      margin: 0 0 14px;
+      line-height: 1.45;
+    }
+    .label {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    input, textarea, button {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: var(--card);
+      color: var(--text);
+      padding: 10px 12px;
+      font-size: 14px;
+      outline: none;
+    }
+    textarea {
+      min-height: 360px;
+      resize: vertical;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      line-height: 1.45;
+    }
+    textarea.compact {
+      min-height: 120px;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .actions button {
+      flex: 1;
+      min-width: 140px;
+    }
+    button {
+      cursor: pointer;
+      background: linear-gradient(90deg, #476ff8, var(--brand));
+      border: 0;
+      font-weight: 700;
+      transition: transform 0.15s ease;
+    }
+    button:active { transform: scale(0.99); }
+    button.secondary {
+      background: #263867;
+      border: 1px solid #345097;
+    }
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+      transform: none;
+    }
+    .tab-strip {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .tab-btn {
+      flex: 1;
+      min-width: 0;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: var(--card);
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 13px;
+      line-height: 1.3;
+    }
+    .tab-btn.active {
+      border-color: rgba(95, 140, 255, 0.65);
+      color: var(--text);
+      background: linear-gradient(180deg, rgba(71, 111, 248, 0.22), rgba(17, 26, 51, 0.95));
+      box-shadow: 0 0 0 1px rgba(95, 140, 255, 0.28);
+    }
+    .tab-panel[hidden] {
+      display: none !important;
+    }
+    .panel-block {
+      padding-top: 2px;
+    }
+    .shared-path {
+      margin-bottom: 14px;
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px dashed #2e457d;
+      background: rgba(15, 23, 42, 0.35);
+    }
+    .shared-path .label {
+      margin-bottom: 6px;
+    }
+    .status {
+      margin-top: 12px;
+      font-size: 13px;
+      color: var(--muted);
+      min-height: 20px;
+    }
+    .status.ok { color: var(--ok); }
+    .score {
+      font-size: 40px;
+      font-weight: 900;
+      margin: 0 0 10px;
+    }
+    .dim {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 7px 0;
+      border-bottom: 1px dashed #2a3a6e;
+      font-size: 13px;
+    }
+    .dim:last-child { border-bottom: 0; }
+    .tips {
+      margin-top: 12px;
+      padding-left: 18px;
+      color: #c9d6ff;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .preview {
+      margin: 0 0 14px;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid #30457f;
+      background: #0a0f1f;
+    }
+    .result-scores {
+      margin-top: 0;
+    }
+    .preview img {
+      width: 100%;
+      display: none;
+    }
+    .meta {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 8px;
+    }
+    .history {
+      margin-top: 12px;
+      border-top: 1px dashed #2a3a6e;
+      padding-top: 10px;
+    }
+    .rank {
+      margin-top: 12px;
+      border-top: 1px dashed #2a3a6e;
+      padding-top: 10px;
+    }
+    .rank h3 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .rank-item {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 6px;
+      font-size: 12px;
+      color: #c7d5ff;
+      padding: 8px 10px;
+      margin-bottom: 6px;
+      border-radius: 10px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .rank-item:hover {
+      background: rgba(95, 140, 255, 0.06);
+    }
+    .rank-item.active {
+      border-color: rgba(95, 140, 255, 0.45);
+      background: rgba(71, 111, 248, 0.12);
+    }
+    .rank-item:last-child {
+      margin-bottom: 0;
+    }
+    .rank-row-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+    }
+    .rank-pos {
+      font-weight: 800;
+      color: #b8c9ff;
+      flex-shrink: 0;
+    }
+    .rank-skill {
+      flex: 1;
+      min-width: 0;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .rank-score {
+      flex-shrink: 0;
+      font-weight: 700;
+      color: #e8ecff;
+    }
+    .rank-row-sub {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 12px;
+      font-size: 11px;
+      color: #7a8ab8;
+    }
+    a.rank-repo-link {
+      display: inline;
+      width: auto;
+      padding: 0;
+      border: 0;
+      background: none;
+      color: #9bb6ff;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    a.rank-repo-link:hover {
+      text-decoration: underline;
+    }
+    .rank-picked {
+      word-break: break-all;
+    }
+    .report {
+      margin-top: 12px;
+      border-top: 1px dashed #2a3a6e;
+      padding-top: 10px;
+    }
+    .report pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 220px;
+      overflow: auto;
+      background: #0d1530;
+      border: 1px solid #2d427a;
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 12px;
+      line-height: 1.45;
+      color: #d8e2ff;
+    }
+    .history-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .history-head h3 {
+      margin: 0;
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 600;
+      flex: 1;
+      min-width: 0;
+    }
+    button.history-clear-all {
+      flex-shrink: 0;
+      width: auto;
+      min-width: auto;
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      background: #263867;
+      border: 1px solid #345097;
+      color: #c7d5ff;
+      border-radius: 10px;
+    }
+    button.history-clear-all:hover {
+      border-color: #5f8cff;
+      color: #e8ecff;
+    }
+    .history-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+      color: #c7d5ff;
+      padding: 6px 0;
+      border-bottom: 1px dashed #22325f;
+      transition: opacity 0.15s ease;
+    }
+    .history-item:hover {
+      opacity: 0.92;
+    }
+    .history-item:last-child {
+      border-bottom: 0;
+    }
+    .history-item-main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      cursor: pointer;
+    }
+    .history-item-main:hover {
+      opacity: 0.88;
+    }
+    button.history-item-del {
+      flex-shrink: 0;
+      width: auto;
+      min-width: auto;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      background: rgba(255, 80, 80, 0.08);
+      border: 1px solid rgba(232, 85, 85, 0.45);
+      color: #ffb4b4;
+      border-radius: 8px;
+    }
+    button.history-item-del:hover {
+      background: rgba(232, 85, 85, 0.18);
+      border-color: rgba(255, 120, 120, 0.65);
+    }
+    .history-empty {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    @media (max-width: 960px) {
+      .grid { grid-template-columns: 1fr; }
+      textarea { min-height: 260px; }
+      textarea.compact { min-height: 100px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1 class="title">昇腾Skills-Eval在线评测</h1>
+    <p class="sub">昇腾Skills评测系统，输出维度分、改进建议与成果卡。支持粘贴正文、公开 Git 仓库单测与批量排行榜。</p>
+
+    <div class="grid">
+      <section class="card" aria-label="评测输入">
+        <div class="tab-strip" role="tablist" aria-label="评测方式">
+          <button type="button" class="tab-btn active" id="tabBtnPaste" role="tab" aria-selected="true" aria-controls="panelPaste">粘贴 SKILL</button>
+          <button type="button" class="tab-btn" id="tabBtnRepo" role="tab" aria-selected="false" aria-controls="panelRepo">单仓库</button>
+          <button type="button" class="tab-btn" id="tabBtnBatch" role="tab" aria-selected="false" aria-controls="panelBatch">批量仓库</button>
+        </div>
+
+        <div class="shared-path" id="sharedSkillPathWrap" hidden>
+          <div class="label">仓库内 SKILL 路径（可选）</div>
+          <input id="repoSkillPath" placeholder="例如 skills/foo/SKILL.md，留空则自动探测" autocomplete="off" />
+        </div>
+
+        <div class="tab-panel panel-block" id="panelPaste" role="tabpanel" aria-labelledby="tabBtnPaste">
+          <h2 class="card-title">粘贴 SKILL.md</h2>
+          <p class="card-hint">适合本地已打开的文件或编辑器内容，右侧将展示维度分、建议与成果卡 PNG。</p>
+          <div class="label">技能名（可选，用于下载文件名）</div>
+          <input id="skillName" value="ascend-skills-eval" autocomplete="off" />
+
+          <div class="label" style="margin-top:10px;">从文件加载（可选）</div>
+          <input type="file" id="mdFile" accept=".md,.markdown,text/markdown,text/plain" />
+
+          <div class="label" style="margin-top:10px;">SKILL.md 全文</div>
+          <textarea id="skillMarkdown" placeholder="将完整 SKILL.md 粘贴到此处，然后点击下方主按钮"></textarea>
+
+          <div class="actions">
+            <button type="button" id="runBtn">评估并生成成果卡</button>
+            <button type="button" class="secondary" id="sampleBtn">填入示例</button>
+          </div>
+        </div>
+
+        <div class="tab-panel panel-block" id="panelRepo" role="tabpanel" aria-labelledby="tabBtnRepo" hidden>
+          <h2 class="card-title">单仓库</h2>
+          <div class="label">仓库链接（公开可读）</div>
+          <input id="repoUrl" placeholder="粘贴 HTTPS 克隆地址（GitHub / GitCode 等）" autocomplete="off" />
+
+          <div class="actions">
+            <button type="button" class="secondary" id="repoBtn">从仓库链接评分</button>
+          </div>
+        </div>
+
+        <div class="tab-panel panel-block" id="panelBatch" role="tabpanel" aria-labelledby="tabBtnBatch" hidden>
+          <h2 class="card-title">批量仓库</h2>
+          <p class="card-hint">每行一个仓库 URL；右侧展示排行榜与汇总报告，第一名详情与成果卡会同步展示。</p>
+          <div class="label">仓库链接列表（每行一个）</div>
+          <textarea id="batchRepoUrls" class="compact" placeholder="https://github.com/org/repo-a&#10;https://github.com/org/repo-b"></textarea>
+
+          <div class="actions">
+            <button type="button" class="secondary" id="batchRepoBtn">批量仓库评分</button>
+          </div>
+        </div>
+
+        <div class="status" id="status">请选择标签并填写对应内容</div>
+      </section>
+
+      <section class="card" aria-label="评测结果">
+        <div class="preview" aria-label="成果卡预览">
+          <img id="cardImage" alt="result card" />
+        </div>
+        <div class="result-scores">
+          <div class="score" id="score">--.-</div>
+          <div class="label">维度评分</div>
+          <div id="dims"></div>
+          <ul class="tips" id="tips"></ul>
+          <div class="meta">
+            <span id="mode">mode: -</span>
+            <div style="text-align:right;line-height:1.6;">
+              <a id="downloadLink" href="#" style="color:#9bb6ff;display:none;margin-right:10px;">下载成果卡 PNG</a>
+              <a id="downloadReportLink" href="#" style="color:#9bb6ff;display:none;margin-right:10px;">下载当前报告 MD</a>
+              <a id="downloadBatchSummaryLink" href="#" style="color:#c9d6ff;display:none;">下载批量汇总 MD</a>
+            </div>
+          </div>
+        </div>
+        <div class="report">
+          <h3 style="margin:0 0 8px;font-size:13px;color:#9aa8d1;font-weight:600;">评分报告（摘要）</h3>
+          <pre id="reportText">暂无报告</pre>
+        </div>
+        <div class="rank">
+          <h3>批量评分排行榜</h3>
+          <p id="rankHint" class="history-empty" style="margin:0 0 8px;font-size:11px;line-height:1.45;display:none;">点击某一行切换右侧成果卡与单仓报告；「打开仓库」在新标签页访问远端仓库。</p>
+          <div id="rankList" class="history-empty">仅在「批量仓库」评测后展示</div>
+        </div>
+        <div class="history">
+          <div class="history-head">
+            <h3>本机最近 10 次评测</h3>
+            <button type="button" class="history-clear-all" id="historyClearAllBtn">清空全部</button>
+          </div>
+          <div id="historyList" class="history-empty">暂无历史（仅存当前浏览器）</div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const sample = `---
+name: ascend-skills-eval
+description: 昇腾技能评测器，提供结构评估和NPU验证流程。
+---
+
+# Ascend Skills Eval
+
+## Phase 0: 初始化
+1. 检查 npu-smi info
+2. 创建 results.tsv
+
+## Phase 1: 评估
+1. 结构评分
+2. 设计 test prompts
+3. 记录失败 fallback
+
+## 异常处理
+- 如果 NPU 不可用，降级 dry_run
+- 如果命令失败，记录日志并重试
+`;
+
+    const $ = (id) => document.getElementById(id);
+    const skillNameEl = $("skillName");
+    const skillMarkdownEl = $("skillMarkdown");
+    const runBtnEl = $("runBtn");
+    const repoBtnEl = $("repoBtn");
+    const batchRepoBtnEl = $("batchRepoBtn");
+    const sampleBtnEl = $("sampleBtn");
+    const mdFileEl = $("mdFile");
+    const repoUrlEl = $("repoUrl");
+    const repoSkillPathEl = $("repoSkillPath");
+    const batchRepoUrlsEl = $("batchRepoUrls");
+    const statusEl = $("status");
+    const scoreEl = $("score");
+    const dimsEl = $("dims");
+    const tipsEl = $("tips");
+    const modeEl = $("mode");
+    const cardImageEl = $("cardImage");
+    const downloadLinkEl = $("downloadLink");
+    const downloadReportLinkEl = $("downloadReportLink");
+    const reportTextEl = $("reportText");
+    const rankListEl = $("rankList");
+    const rankHintEl = $("rankHint");
+    const historyListEl = $("historyList");
+    const historyClearAllBtn = $("historyClearAllBtn");
+    const downloadBatchSummaryLinkEl = $("downloadBatchSummaryLink");
+
+    const tabBtnPaste = $("tabBtnPaste");
+    const tabBtnRepo = $("tabBtnRepo");
+    const tabBtnBatch = $("tabBtnBatch");
+    const panelPaste = $("panelPaste");
+    const panelRepo = $("panelRepo");
+    const panelBatch = $("panelBatch");
+    const sharedSkillPathWrap = $("sharedSkillPathWrap");
+
+    let activeTab = "paste";
+
+    /** 批量评测：history_id -> 单次仓库评测完整返回（含 eval / card / report_markdown） */
+    let batchResultByHistoryId = new Map();
+
+    const LOCAL_HISTORY_KEY = "ascend-skills-eval-local-history-v1";
+    const LOCAL_HISTORY_MAX = 10;
+
+    function newLocalHistoryId() {
+      if (typeof crypto !== "undefined" && crypto.randomUUID) {
+        return crypto.randomUUID();
+      }
+      return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+    }
+
+    function localHistoryRead() {
+      try {
+        const raw = localStorage.getItem(LOCAL_HISTORY_KEY);
+        if (!raw) return [];
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function localHistoryWrite(items) {
+      localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify(items));
+    }
+
+    function localHistoryPrepend(entry) {
+      try {
+        const next = [entry, ...localHistoryRead()].slice(0, LOCAL_HISTORY_MAX);
+        localHistoryWrite(next);
+      } catch (e) {
+        console.warn("本机历史写入失败（可能超出存储配额）", e);
+      }
+    }
+
+    function localHistoryRemove(id) {
+      const next = localHistoryRead().filter((x) => x.id !== id);
+      localHistoryWrite(next);
+      loadHistory();
+      statusEl.textContent = "已删除本条本机历史";
+      statusEl.className = "status ok";
+    }
+
+    function localHistoryClearAll() {
+      if (!localHistoryRead().length) {
+        statusEl.textContent = "当前没有本机历史";
+        statusEl.className = "status";
+        return;
+      }
+      if (!confirm("确定清空全部本机评测历史？此操作不可恢复。")) {
+        return;
+      }
+      localHistoryWrite([]);
+      loadHistory();
+      statusEl.textContent = "已清空全部本机历史";
+      statusEl.className = "status ok";
+    }
+
+    function clearBatchRankUi() {
+      batchResultByHistoryId = new Map();
+      downloadBatchSummaryLinkEl.style.display = "none";
+      downloadBatchSummaryLinkEl.href = "#";
+      rankHintEl.style.display = "none";
+    }
+
+    function setBatchSummaryDownload(markdown) {
+      if (!markdown || !markdown.trim()) {
+        downloadBatchSummaryLinkEl.style.display = "none";
+        return;
+      }
+      const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      downloadBatchSummaryLinkEl.href = url;
+      downloadBatchSummaryLinkEl.download = "batch-repo-eval-summary.md";
+      downloadBatchSummaryLinkEl.style.display = "inline";
+    }
+
+    function selectBatchRank(historyId) {
+      const r = batchResultByHistoryId.get(historyId);
+      if (!r || !r.eval || !r.card) return;
+      document.querySelectorAll("#rankList .rank-item").forEach((el) => {
+        el.classList.toggle("active", el.dataset.historyId === historyId);
+      });
+      renderEvalAndCard(r.eval, r.card, r.report_markdown || "");
+    }
+
+    function setTab(which) {
+      activeTab = which;
+      const map = [
+        { id: "paste", btn: tabBtnPaste, panel: panelPaste },
+        { id: "repo", btn: tabBtnRepo, panel: panelRepo },
+        { id: "batch", btn: tabBtnBatch, panel: panelBatch },
+      ];
+      map.forEach(({ id, btn, panel }) => {
+        const on = id === which;
+        btn.classList.toggle("active", on);
+        btn.setAttribute("aria-selected", on ? "true" : "false");
+        panel.hidden = !on;
+      });
+      sharedSkillPathWrap.hidden = which === "paste";
+      if (which === "paste") {
+        statusEl.textContent = skillMarkdownEl.value.trim()
+          ? "已填写 SKILL，可直接评估"
+          : "请粘贴 SKILL.md 或载入示例";
+      } else if (which === "repo") {
+        statusEl.textContent = repoUrlEl.value.trim()
+          ? "已填写仓库链接，可从仓库评分"
+          : "请输入仓库链接";
+      } else {
+        statusEl.textContent = batchRepoUrlsEl.value.trim()
+          ? "已填写批量列表，可开始批量评分"
+          : "请每行填写一个仓库链接";
+      }
+      statusEl.className = "status";
+    }
+
+    tabBtnPaste.addEventListener("click", () => setTab("paste"));
+    tabBtnRepo.addEventListener("click", () => setTab("repo"));
+    tabBtnBatch.addEventListener("click", () => setTab("batch"));
+
+    function renderRanking(ranking = [], results = []) {
+      batchResultByHistoryId = new Map();
+      (results || []).forEach((r) => {
+        if (r && r.history_id) batchResultByHistoryId.set(r.history_id, r);
+      });
+
+      if (!ranking.length) {
+        rankListEl.className = "history-empty";
+        rankListEl.textContent = "暂无数据（使用「批量仓库」后出现）";
+        clearBatchRankUi();
+        return;
+      }
+
+      rankListEl.className = "";
+      rankListEl.innerHTML = "";
+      rankHintEl.style.display = "block";
+
+      ranking.forEach((item, idx) => {
+        const row = document.createElement("div");
+        row.className = "rank-item";
+        row.dataset.historyId = item.history_id;
+        row.setAttribute("role", "button");
+        row.tabIndex = 0;
+
+        const top = document.createElement("div");
+        top.className = "rank-row-top";
+        const pos = document.createElement("span");
+        pos.className = "rank-pos";
+        pos.textContent = `#${idx + 1}`;
+        const skill = document.createElement("span");
+        skill.className = "rank-skill";
+        skill.textContent = item.skill_name || "";
+        skill.title = item.skill_name || "";
+        const sc = document.createElement("span");
+        sc.className = "rank-score";
+        sc.textContent = `${item.total_score} 分`;
+        top.appendChild(pos);
+        top.appendChild(skill);
+        top.appendChild(sc);
+
+        const sub = document.createElement("div");
+        sub.className = "rank-row-sub";
+        const link = document.createElement("a");
+        link.className = "rank-repo-link";
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = "打开仓库 ↗";
+        try {
+          const u = new URL(item.repo_url);
+          link.href =
+            u.protocol === "http:" || u.protocol === "https:" ? item.repo_url : "#";
+        } catch {
+          link.href = "#";
+        }
+        link.addEventListener("click", (e) => e.stopPropagation());
+        const picked = document.createElement("span");
+        picked.className = "rank-picked";
+        picked.textContent = item.picked_file || "";
+        sub.appendChild(link);
+        sub.appendChild(picked);
+
+        row.appendChild(top);
+        row.appendChild(sub);
+
+        row.addEventListener("click", () => selectBatchRank(item.history_id));
+        row.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            selectBatchRank(item.history_id);
+          }
+        });
+        rankListEl.appendChild(row);
+      });
+
+      if (ranking[0] && ranking[0].history_id) {
+        selectBatchRank(ranking[0].history_id);
+      }
+    }
+
+    function setReportMarkdown(reportMarkdown, skillName = "ascend-skills-eval") {
+      if (!reportMarkdown) {
+        reportTextEl.textContent = "暂无报告";
+        downloadReportLinkEl.style.display = "none";
+        return;
+      }
+      reportTextEl.textContent = reportMarkdown;
+      const blob = new Blob([reportMarkdown], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      downloadReportLinkEl.href = url;
+      downloadReportLinkEl.download = `${skillName || "skill"}-report.md`;
+      downloadReportLinkEl.style.display = "inline";
+    }
+
+    function renderEvalAndCard(evalInfo, card, reportMarkdown = "") {
+      scoreEl.textContent = String(evalInfo.total_score);
+      modeEl.textContent = `mode: ${evalInfo.mode}`;
+
+      dimsEl.innerHTML = "";
+      evalInfo.dimensions.forEach((d) => {
+        const row = document.createElement("div");
+        row.className = "dim";
+        row.innerHTML = `<span>${d.id}. ${d.name}</span><strong>${d.score}/10</strong>`;
+        dimsEl.appendChild(row);
+      });
+
+      tipsEl.innerHTML = "";
+      evalInfo.suggestions.forEach((s) => {
+        const li = document.createElement("li");
+        li.textContent = s;
+        tipsEl.appendChild(li);
+      });
+
+      const src = `data:${card.mime_type};base64,${card.image_base64}`;
+      cardImageEl.src = src;
+      cardImageEl.style.display = "block";
+
+      downloadLinkEl.href = src;
+      const safeName = String(evalInfo.skill_name || "skill").replace(/[/\\?%*:|"<>]/g, "-");
+      downloadLinkEl.download = `${safeName}-result.png`;
+      downloadLinkEl.style.display = "inline";
+      setReportMarkdown(reportMarkdown, evalInfo.skill_name);
+    }
+
+    function replayLocalHistoryItem(historyId) {
+      statusEl.textContent = "正在回放本机记录...";
+      statusEl.className = "status";
+      renderRanking([]);
+      const detail = localHistoryRead().find((x) => x.id === historyId);
+      if (!detail) {
+        statusEl.textContent = "未找到该条本机历史";
+        statusEl.className = "status";
+        return;
+      }
+      try {
+        setTab("paste");
+        skillNameEl.value = detail.skill_name || "";
+        skillMarkdownEl.value = detail.skill_markdown || "";
+        if (detail.source_type === "repo" && detail.source_ref) {
+          repoUrlEl.value = detail.source_ref;
+        }
+        renderEvalAndCard(detail.eval, detail.card, detail.report_markdown || "");
+        statusEl.textContent = "已从本机历史回放";
+        statusEl.className = "status ok";
+      } catch (err) {
+        statusEl.textContent = `回放失败：${err.message}`;
+        statusEl.className = "status";
+      }
+    }
+
+    function loadHistory() {
+      const rows = localHistoryRead();
+      if (!rows.length) {
+        historyListEl.className = "history-empty";
+        historyListEl.textContent = "暂无历史（仅存当前浏览器）";
+        return;
+      }
+      historyListEl.className = "";
+      historyListEl.innerHTML = "";
+      rows.forEach((r) => {
+        const row = document.createElement("div");
+        row.className = "history-item";
+
+        const main = document.createElement("div");
+        main.className = "history-item-main";
+        const left = document.createElement("span");
+        left.textContent = r.skill_name || "";
+        const right = document.createElement("span");
+        right.textContent = `${r.total_score} 分 · ${new Date(r.timestamp).toLocaleString()}`;
+        main.appendChild(left);
+        main.appendChild(right);
+        main.title = "点击回放（仅本机保存）";
+        main.addEventListener("click", () => replayLocalHistoryItem(r.id));
+
+        const delBtn = document.createElement("button");
+        delBtn.type = "button";
+        delBtn.className = "history-item-del";
+        delBtn.textContent = "删除";
+        delBtn.title = "从本机历史中移除本条";
+        delBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          localHistoryRemove(r.id);
+        });
+
+        row.appendChild(main);
+        row.appendChild(delBtn);
+        historyListEl.appendChild(row);
+      });
+    }
+
+    historyClearAllBtn.addEventListener("click", () => localHistoryClearAll());
+
+    sampleBtnEl.addEventListener("click", () => {
+      skillMarkdownEl.value = sample;
+      setTab("paste");
+      statusEl.textContent = "已填入示例，可直接运行";
+      statusEl.className = "status ok";
+    });
+
+    mdFileEl.addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        skillMarkdownEl.value = text;
+        setTab("paste");
+        if (!skillNameEl.value.trim()) {
+          const inferred = file.name.replace(/\.(md|markdown)$/i, "");
+          skillNameEl.value = inferred || "ascend-skills-eval";
+        }
+        statusEl.textContent = `已加载文件：${file.name}`;
+        statusEl.className = "status ok";
+      } catch (err) {
+        statusEl.textContent = `读取文件失败：${err.message}`;
+        statusEl.className = "status";
+      }
+    });
+
+    runBtnEl.addEventListener("click", async () => {
+      const skill_markdown = skillMarkdownEl.value.trim();
+      const skill_name = skillNameEl.value.trim() || "unknown-skill";
+      if (!skill_markdown) {
+        statusEl.textContent = "请先粘贴 SKILL.md 内容";
+        statusEl.className = "status";
+        setTab("paste");
+        return;
+      }
+
+      runBtnEl.disabled = true;
+      statusEl.textContent = "处理中，请稍候...";
+      statusEl.className = "status";
+
+      try {
+        const resp = await fetch("/evaluate-and-render", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ skill_name, skill_markdown }),
+        });
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(text || "请求失败");
+        }
+
+        const data = await resp.json();
+        const evalInfo = data.eval;
+        const card = data.card;
+        renderRanking([]);
+        renderEvalAndCard(evalInfo, card, "");
+
+        localHistoryPrepend({
+          id: newLocalHistoryId(),
+          timestamp: new Date().toISOString(),
+          skill_name: evalInfo.skill_name,
+          total_score: evalInfo.total_score,
+          mode: evalInfo.mode,
+          skill_markdown,
+          eval: evalInfo,
+          card,
+          report_markdown: "",
+          source_type: "text",
+          source_ref: evalInfo.skill_name,
+        });
+        loadHistory();
+
+        statusEl.textContent = "完成：已生成评分与成果卡";
+        statusEl.className = "status ok";
+      } catch (err) {
+        statusEl.textContent = `失败：${err.message}`;
+        statusEl.className = "status";
+      } finally {
+        runBtnEl.disabled = false;
+      }
+    });
+
+    repoBtnEl.addEventListener("click", async () => {
+      const repo_url = repoUrlEl.value.trim();
+      const skill_path = repoSkillPathEl.value.trim();
+      if (!repo_url) {
+        statusEl.textContent = "请先输入仓库链接";
+        statusEl.className = "status";
+        setTab("repo");
+        return;
+      }
+
+      repoBtnEl.disabled = true;
+      statusEl.textContent = "正在拉取仓库并评估，请稍候...";
+      statusEl.className = "status";
+
+      try {
+        const payload = { repo_url };
+        if (skill_path) payload.skill_path = skill_path;
+        const resp = await fetch("/evaluate-repo", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(text || "仓库评分失败");
+        }
+
+        const data = await resp.json();
+        skillNameEl.value = data.eval.skill_name || "";
+        skillMarkdownEl.value = data.skill_markdown || skillMarkdownEl.value;
+        renderEvalAndCard(data.eval, data.card, data.report_markdown || "");
+        renderRanking([]);
+        localHistoryPrepend({
+          id: newLocalHistoryId(),
+          timestamp: new Date().toISOString(),
+          skill_name: data.eval.skill_name,
+          total_score: data.eval.total_score,
+          mode: data.eval.mode,
+          skill_markdown: data.skill_markdown || "",
+          eval: data.eval,
+          card: data.card,
+          report_markdown: data.report_markdown || "",
+          source_type: "repo",
+          source_ref: data.repo_url,
+        });
+        loadHistory();
+        statusEl.textContent = `完成：仓库评分成功（${data.picked_file}）· 正文已同步到「粘贴 SKILL」标签，可改后再评`;
+        statusEl.className = "status ok";
+      } catch (err) {
+        statusEl.textContent = `仓库评分失败：${err.message}`;
+        statusEl.className = "status";
+      } finally {
+        repoBtnEl.disabled = false;
+      }
+    });
+
+    batchRepoBtnEl.addEventListener("click", async () => {
+      const lines = batchRepoUrlsEl.value
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (!lines.length) {
+        statusEl.textContent = "请先在批量输入框填写仓库链接（每行一个）";
+        statusEl.className = "status";
+        setTab("batch");
+        return;
+      }
+
+      batchRepoBtnEl.disabled = true;
+      statusEl.textContent = `正在批量评分（${lines.length} 个仓库）...`;
+      statusEl.className = "status";
+
+      try {
+        const skill_path = repoSkillPathEl.value.trim();
+        const items = lines.map((repo_url) => {
+          const item = { repo_url };
+          if (skill_path) item.skill_path = skill_path;
+          return item;
+        });
+        const resp = await fetch("/evaluate-repos", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ items }),
+        });
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(text || "批量评分失败");
+        }
+        const data = await resp.json();
+        renderRanking(data.ranking || [], data.results || []);
+        setBatchSummaryDownload(data.batch_report_markdown || "");
+
+        (data.results || []).forEach((r) => {
+          localHistoryPrepend({
+            id: newLocalHistoryId(),
+            timestamp: new Date().toISOString(),
+            skill_name: r.eval.skill_name,
+            total_score: r.eval.total_score,
+            mode: r.eval.mode,
+            skill_markdown: r.skill_markdown || "",
+            eval: r.eval,
+            card: r.card,
+            report_markdown: r.report_markdown || "",
+            source_type: "repo",
+            source_ref: r.repo_url,
+          });
+        });
+        loadHistory();
+
+        statusEl.textContent = `批量完成：成功 ${data.summary.success} / 失败 ${data.summary.failed}`;
+        statusEl.className = "status ok";
+      } catch (err) {
+        statusEl.textContent = `批量评分失败：${err.message}`;
+        statusEl.className = "status";
+      } finally {
+        batchRepoBtnEl.disabled = false;
+      }
+    });
+
+    setTab("paste");
+    loadHistory();
+  </script>
+</body>
+</html>
