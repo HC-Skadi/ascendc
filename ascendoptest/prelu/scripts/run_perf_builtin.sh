@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SUITE_DIR=$(cd "${SCRIPT_DIR}/.." && pwd)
 ASCENDOPTEST_DIR=$(cd "${SUITE_DIR}/.." && pwd)
 VENDORS_DIR="/usr/local/Ascend/cann-9.0.0-beta.2/opp/vendors"
-CUSTOMIZE_DIR="${VENDORS_DIR}/prelu_nn"
+CUSTOMIZE_DIR="${VENDORS_DIR}/prelu_custom"
 CUSTOMIZE_BACKUP_DIR="${VENDORS_DIR}/prelu_nn.__builtin_perf_backup__"
 
 case_args=()

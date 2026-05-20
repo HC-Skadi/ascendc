@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 
-ROOT = Path("/root/hc/ops-prelu/codex/ascendoptest/prelu")  
+ROOT = Path("/home/ma-user/work/ascendc/ascendoptest/prelu")  
 CASE_DIR = ROOT / "cases"
 GOLDEN_FILE = ROOT / "golden/prelu_expect.py"
 
