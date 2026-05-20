@@ -6,8 +6,12 @@ SUITE_DIR=$(cd "${SCRIPT_DIR}/.." && pwd)
 ASCENDOPTEST_DIR=$(cd "${SUITE_DIR}/.." && pwd)
 
 if [[ -z "${ASCEND_HOME_PATH:-}" ]]; then
-    if [[ -d "/usr/local/Ascend/cann-9.0.0-beta.2" ]]; then
+    if [[ -d "/home/ma-user/Ascend/cann-9.0.0-beta.2" ]]; then
+        export ASCEND_HOME_PATH="/home/ma-user/Ascend/cann-9.0.0-beta.2"
+    elif [[ -d "/usr/local/Ascend/cann-9.0.0-beta.2" ]]; then
         export ASCEND_HOME_PATH="/usr/local/Ascend/cann-9.0.0-beta.2"
+    elif [[ -d "/home/ma-user/Ascend/cann" ]]; then
+        export ASCEND_HOME_PATH="/home/ma-user/Ascend/cann"
     else
         export ASCEND_HOME_PATH="/usr/local/Ascend/cann"
     fi
@@ -18,11 +22,17 @@ if [[ -f "${ASCEND_HOME_PATH}/set_env.sh" ]]; then
     source "${ASCEND_HOME_PATH}/set_env.sh"
 fi
 
+export DDK_PATH="${DDK_PATH:-${ASCEND_HOME_PATH}}"
+export NPU_HOST_LIB="${NPU_HOST_LIB:-${ASCEND_HOME_PATH}/lib64}"
+
 if [[ -z "${ASCEND_CUSTOM_OPP_PATH:-}" ]]; then
     for vendor_path in \
         "${ASCEND_HOME_PATH}/opp/vendors/prelu_custom" \
+        "/home/ma-user/Ascend/cann-9.0.0-beta.2/opp/vendors/prelu_custom" \
+        "/home/ma-user/Ascend/opp/vendors/prelu_custom" \
         "/usr/local/Ascend/opp/vendors/prelu_custom" \
         "${ASCEND_HOME_PATH}/opp/vendors/prelu_nn" \
+        "/home/ma-user/Ascend/cann-9.0.0-beta.2/opp/vendors/prelu_nn" \
         "/usr/local/Ascend/opp/vendors/prelu_nn"; do
         if [[ -f "${vendor_path}/op_api/include/aclnn_prelu.h" ]]; then
             export ASCEND_CUSTOM_OPP_PATH="${vendor_path}"
@@ -49,6 +59,7 @@ if [[ -z "${ASCEND_CUSTOM_OPAPI_PATH}" ]]; then
 fi
 
 export LD_LIBRARY_PATH="${ASCEND_CUSTOM_OPAPI_PATH}/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${NPU_HOST_LIB}:${LD_LIBRARY_PATH}"
 
 case_args=()
 if [[ "${1:-}" == "-n" ]]; then
