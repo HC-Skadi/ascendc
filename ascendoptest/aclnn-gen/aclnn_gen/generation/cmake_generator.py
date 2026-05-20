@@ -45,14 +45,8 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "./")
 
 set(INC_PATH $ENV{{DDK_PATH}})
 
-if ("$ENV{{DDK_PATH}}" STREQUAL "")
-    if (EXISTS "/home/ma-user/Ascend/cann-9.0.0-beta.2")
-        set(INC_PATH "/home/ma-user/Ascend/cann-9.0.0-beta.2")
-    elseif (EXISTS "/usr/local/Ascend/cann-9.0.0-beta.2")
-        set(INC_PATH "/usr/local/Ascend/cann-9.0.0-beta.2")
-    else()
-        set(INC_PATH "/usr/local/Ascend/ascend-toolkit/latest")
-    endif()
+if (NOT DEFINED ENV{{DDK_PATH}})
+    set(INC_PATH "/usr/local/Ascend/ascend-toolkit/latest")
     message(STATUS "set default INC_PATH: ${{INC_PATH}}")
 else ()
     message(STATUS "env INC_PATH: ${{INC_PATH}}")
@@ -65,9 +59,9 @@ endif()
         ]
         link_paths = []
         link_libraries = [
-            "${ASCENDCL_LIBRARY}",
-            "${ACL_OP_COMPILER_LIBRARY}",
-            "${NNOPBASE_LIBRARY}",
+            "ascendcl",
+            "acl_op_compiler",
+            "nnopbase",
             "stdc++",
         ]
         
@@ -77,9 +71,9 @@ endif()
 set(LIB_PATH $ENV{{NPU_HOST_LIB}})
 
 # Dynamic libraries in the stub directory can only be used for compilation
-if ("$ENV{{NPU_HOST_LIB}}" STREQUAL "")
-    set(LIB_PATH "${{INC_PATH}}/lib64")
-    set(LIB_PATH1 "${{INC_PATH}}/lib64")
+if (NOT DEFINED ENV{{NPU_HOST_LIB}})
+    set(LIB_PATH "/usr/local/Ascend/ascend-toolkit/latest/acllib/lib64/stub/")
+    set(LIB_PATH1 "/usr/local/Ascend/ascend-toolkit/latest/atc/lib64/stub/")
     message(STATUS "set default LIB_PATH: ${{LIB_PATH}}")
 else ()
     message(STATUS "env LIB_PATH: ${{LIB_PATH}}")
@@ -90,11 +84,11 @@ message(STATUS "Using custom operator package path: ${{CUST_PKG_PATH}}")
 """
             include_paths.append("${CUST_PKG_PATH}/include")
             link_paths.extend([
-                "${CUST_PKG_PATH}/lib",
+                "${CUST_PKG_PATH}/lib"
                 "${LIB_PATH}",
                 "${LIB_PATH1}",
             ])
-            link_libraries.append("${CUSTOM_OPAPI_LIBRARY}")
+            link_libraries.append("cust_opapi")
         else: # built-in
             include_paths.append("${INC_PATH}/include/aclnnop")
             include_paths.append("${INC_PATH}/include/aclnnop/level2")
@@ -108,58 +102,6 @@ message(STATUS "Using custom operator package path: ${{CUST_PKG_PATH}}")
         
         # Format link_directories
         link_block = "\nlink_directories(\n" + "\n".join([f"    {p}" for p in link_paths]) + "\n)\n"
-
-        find_library_block = """
-if (NOT DEFINED LIB_PATH OR "${LIB_PATH}" STREQUAL "")
-    if ("$ENV{NPU_HOST_LIB}" STREQUAL "")
-        set(LIB_PATH "${INC_PATH}/lib64")
-    else()
-        set(LIB_PATH "$ENV{NPU_HOST_LIB}")
-    endif()
-endif()
-if (NOT DEFINED LIB_PATH1 OR "${LIB_PATH1}" STREQUAL "")
-    set(LIB_PATH1 "${INC_PATH}/lib64")
-endif()
-
-set(ASCEND_LIBRARY_SEARCH_PATHS
-    ${LIB_PATH}
-    ${LIB_PATH1}
-    ${INC_PATH}/lib64
-    ${INC_PATH}/aarch64-linux/lib64
-    ${INC_PATH}/runtime/lib64
-    ${INC_PATH}/acllib/lib64/stub
-    ${INC_PATH}/atc/lib64/stub
-)
-
-find_library(ASCENDCL_LIBRARY NAMES ascendcl PATHS ${ASCEND_LIBRARY_SEARCH_PATHS} NO_DEFAULT_PATH)
-find_library(ACL_OP_COMPILER_LIBRARY NAMES acl_op_compiler PATHS ${ASCEND_LIBRARY_SEARCH_PATHS} NO_DEFAULT_PATH)
-find_library(NNOPBASE_LIBRARY NAMES nnopbase PATHS ${ASCEND_LIBRARY_SEARCH_PATHS} NO_DEFAULT_PATH)
-
-if(NOT ASCENDCL_LIBRARY)
-    message(FATAL_ERROR "libascendcl.so not found. INC_PATH=${INC_PATH}, LIB_PATH=${LIB_PATH}")
-endif()
-if(NOT ACL_OP_COMPILER_LIBRARY)
-    message(FATAL_ERROR "libacl_op_compiler.so not found. INC_PATH=${INC_PATH}, LIB_PATH=${LIB_PATH}")
-endif()
-if(NOT NNOPBASE_LIBRARY)
-    message(FATAL_ERROR "libnnopbase.so not found. INC_PATH=${INC_PATH}, LIB_PATH=${LIB_PATH}")
-endif()
-"""
-        if self.op_type == 'custom':
-            find_library_block += """
-find_library(CUSTOM_OPAPI_LIBRARY NAMES cust_opapi PATHS ${CUST_PKG_PATH}/lib NO_DEFAULT_PATH)
-if(NOT CUSTOM_OPAPI_LIBRARY)
-    message(FATAL_ERROR "libcust_opapi.so not found. CUST_PKG_PATH=${CUST_PKG_PATH}")
-endif()
-"""
-        else:
-            find_library_block += """
-find_library(OPAPI_LIBRARY NAMES opapi PATHS ${ASCEND_LIBRARY_SEARCH_PATHS} NO_DEFAULT_PATH)
-if(NOT OPAPI_LIBRARY)
-    message(FATAL_ERROR "libopapi.so not found. INC_PATH=${INC_PATH}, LIB_PATH=${LIB_PATH}")
-endif()
-"""
-            link_libraries[-1] = "${OPAPI_LIBRARY}"
         
         # Format target_link_libraries
         link_lib_block = f"target_link_libraries({executable_name}\n" + "\n".join([f"    {lib}" for lib in link_libraries]) + "\n)"
@@ -177,4 +119,4 @@ add_executable({executable_name}
 # In our simple case, it just copies the executable to the build directory.
 install(TARGETS {executable_name} DESTINATION ${{CMAKE_RUNTIME_OUTPUT_DIRECTORY}})
 """
-        return cmake_header + custom_op_block + include_block + link_block + find_library_block + cmake_body
+        return cmake_header + custom_op_block + include_block + link_block + cmake_body
