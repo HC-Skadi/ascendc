@@ -10,8 +10,7 @@
                 ],
                 "type": [
                     "float16",
-                    "float",
-                    "bfloat16"
+                    "float"
                 ]
             },
             {
@@ -22,8 +21,7 @@
                 ],
                 "type": [
                     "float16",
-                    "float",
-                    "bfloat16"
+                    "float"
                 ]
             }
         ],
@@ -36,8 +34,7 @@
                 ],
                 "type": [
                     "float16",
-                    "float",
-                    "bfloat16"
+                    "float"
                 ]
             }
         ]

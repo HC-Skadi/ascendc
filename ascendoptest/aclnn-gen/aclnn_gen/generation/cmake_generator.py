@@ -84,7 +84,7 @@ message(STATUS "Using custom operator package path: ${{CUST_PKG_PATH}}")
 """
             include_paths.append("${CUST_PKG_PATH}/include")
             link_paths.extend([
-                "${CUST_PKG_PATH}/lib"
+                "${CUST_PKG_PATH}/lib",
                 "${LIB_PATH}",
                 "${LIB_PATH1}",
             ])

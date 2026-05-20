@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 
-ROOT = Path("/home/ma-user/work/ascendc/ascendoptest/prelu")  
+ROOT = Path(__file__).resolve().parents[1]
 CASE_DIR = ROOT / "cases"
 GOLDEN_FILE = ROOT / "golden/prelu_expect.py"
 
@@ -27,9 +27,6 @@ MINIMAL_CASE_MATRIX = [
     ("float16", "pc_inner32_aligned",   [2, 3, 32],  "per_channel", [3],          "mixed_sign",   "Prelu<T> Duplicate branch"),
     ("float32", "scalar_aligned",       [8, 32],     "scalar",      [1],          "mixed_sign",   "fp32 scalar direct"),
     ("float32", "2d_pc_tail",           [2, 33],     "per_channel", [33],         "mixed_sign",   "dim1 channel + SetValue + fp32 tail"),
-    ("bfloat16", "2d_scalar_tail",      [1, 17],     "scalar",      [1],          "mixed_sign",   "bf16 scalar fp32 intermediate"),
-    ("bfloat16", "pc_inner32_aligned",  [2, 3, 32],  "per_channel", [3],          "mixed_sign",   "bf16 vector Duplicate branch"),
-    ("bfloat16", "pc_inner7_unaligned", [5, 3, 7],   "per_channel", [3],          "mixed_sign",   "bf16 vector SetValue + tail"),
 ]
 
 BALANCED_SHAPES = [
@@ -47,7 +44,6 @@ STRESS_CASE_MATRIX = [
     # dtype,     shape_tag,              x_shape,         weight_type,   weight_shape, scenario,     note
     ("float16",  "large_pc_inner513",    [32, 16, 513],   "per_channel", [16],         "mixed_sign", "multi-core fp16 per-channel tail"),
     ("float32",  "large_scalar_tail",    [1, 4097],       "scalar",      [1],          "mixed_sign", "multi-core fp32 scalar tail"),
-    ("bfloat16", "large_pc_4d_inner289", [4, 16, 17, 17], "per_channel", [16],         "mixed_sign", "multi-core bf16 rank4 per-channel"),
 ]
 
 LARGE_SHAPES = [
@@ -124,10 +120,6 @@ CHANNEL_SCALAR_DTYPE_SHAPES = {
     "float16": [
         ("pc_c257_inner16_aligned", [1, 257, 16],    "per_channel", [257],        "float16 32B-aligned inner"),
         ("pc_c257_inner17_tail",    [1, 257, 17],    "per_channel", [257],        "float16 one element past 32B alignment"),
-    ],
-    "bfloat16": [
-        ("pc_c257_inner16_aligned", [1, 257, 16],    "per_channel", [257],        "bfloat16 input 32B-aligned inner"),
-        ("pc_c257_inner17_tail",    [1, 257, 17],    "per_channel", [257],        "bfloat16 input one element past 32B alignment"),
     ],
 }
 
