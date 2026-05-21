@@ -61,7 +61,7 @@ parser.add_argument("--build", action="store_true",
                     help="build aclnn project, default is False, if config while gen aclnn project and build exe")
 
 # custom operator package path
-parser.add_argument("--op-path", type=str, default="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/prelu_nn/op_api",
+parser.add_argument("--op-path", type=str, default="/home/ma-user/Ascend/ascend-toolkit/latest/opp/vendors/prelu_nn/op_api",
                     help="path to the custom operator package directory")
 
 # operator type

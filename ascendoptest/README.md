@@ -303,7 +303,7 @@ def custom_add(a, b):
 3.  测试算子功能或性能需要配置LD_LIBRARY_PATH指定自定义算子的op_api库路径环境变量。
     eg:
     ```
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=/home/ma-user/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib:$LD_LIBRARY_PATH
     ```
     应根据实际情况修改。例如华为云ECS默认算子部署安装路径为"/home/ma-user/Ascend/ascend-toolkit/latest/opp/vendors/customize"，此时环境变量应设置为:
     ```

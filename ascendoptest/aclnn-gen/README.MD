@@ -50,7 +50,7 @@ pip install dist/aclnn_codegen-0.0.2-py3-none-any.whl
 
 ```bash
 # 命令格式: aclnngen <原型文件> <用例文件> -o <输出目录> --op-type custom --op-path <算子包路径>
-aclnngen Add_Custom.json add_custom_cases.json -o my_add_test --op-type custom --op-path /usr/local/Ascend/opp/vendors/customize/op_api
+aclnngen Add_Custom.json add_custom_cases.json -o my_add_test --op-type custom --op-path /home/ma-user/Ascend/opp/vendors/customize/op_api
 ```
 -   `--op-path`: 自定义算子包的安装路径（包含 `include` 和 `lib` 的父目录）。
 

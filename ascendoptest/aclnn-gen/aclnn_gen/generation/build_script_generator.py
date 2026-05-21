@@ -31,7 +31,7 @@ else
         _ASCEND_INSTALL_PATH=$HOME/Ascend/ascend-toolkit/latest
     else
         # Default fallback path
-        _ASCEND_INSTALL_PATH=/usr/local/Ascend/ascend-toolkit/latest
+        _ASCEND_INSTALL_PATH=/home/ma-user/Ascend/ascend-toolkit/latest
     fi
 fi
 

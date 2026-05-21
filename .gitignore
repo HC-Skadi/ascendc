@@ -79,3 +79,6 @@ cases/
 result.csv
 aclnn_*_perf/
 .pycache/
+op_test/
+prof/
+test/

@@ -45,7 +45,7 @@ comprehensive project that can run any of the specified test cases.
     )
     parser.add_argument(
         "--op-path",
-        default="/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api",
+        default="/home/ma-user/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api",
         help="Path to the custom operator package directory."
     )
     parser.add_argument(

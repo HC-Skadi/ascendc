@@ -46,7 +46,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "./")
 set(INC_PATH $ENV{{DDK_PATH}})
 
 if (NOT DEFINED ENV{{DDK_PATH}})
-    set(INC_PATH "/usr/local/Ascend/ascend-toolkit/latest")
+    set(INC_PATH "/home/ma-user/Ascend/ascend-toolkit/latest")
     message(STATUS "set default INC_PATH: ${{INC_PATH}}")
 else ()
     message(STATUS "env INC_PATH: ${{INC_PATH}}")
@@ -72,8 +72,8 @@ set(LIB_PATH $ENV{{NPU_HOST_LIB}})
 
 # Dynamic libraries in the stub directory can only be used for compilation
 if (NOT DEFINED ENV{{NPU_HOST_LIB}})
-    set(LIB_PATH "/usr/local/Ascend/ascend-toolkit/latest/acllib/lib64/stub/")
-    set(LIB_PATH1 "/usr/local/Ascend/ascend-toolkit/latest/atc/lib64/stub/")
+    set(LIB_PATH "/home/ma-user/Ascend/ascend-toolkit/latest/acllib/lib64/stub/")
+    set(LIB_PATH1 "/home/ma-user/Ascend/ascend-toolkit/latest/atc/lib64/stub/")
     message(STATUS "set default LIB_PATH: ${{LIB_PATH}}")
 else ()
     message(STATUS "env LIB_PATH: ${{LIB_PATH}}")
@@ -84,7 +84,7 @@ message(STATUS "Using custom operator package path: ${{CUST_PKG_PATH}}")
 """
             include_paths.append("${CUST_PKG_PATH}/include")
             link_paths.extend([
-                "${CUST_PKG_PATH}/lib"
+                "${CUST_PKG_PATH}/lib",
                 "${LIB_PATH}",
                 "${LIB_PATH1}",
             ])
