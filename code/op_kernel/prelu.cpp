@@ -16,14 +16,15 @@ __global__ __aicore__ void prelu(GM_ADDR x, GM_ADDR weight, GM_ADDR y, GM_ADDR w
 {
     REGISTER_TILING_DEFAULT(PreluTilingData);
     GET_TILING_DATA_WITH_STRUCT(PreluTilingData, tilingData, tiling);
+    AscendC::TPipe pipe;
     if constexpr (schMode == static_cast<uint32_t>(PreluTilingKey::TILING_KEY_PRELU_MODE_0)) {
         NsPrelu::Prelu<half> op;
-        op.Init(x, weight, y, &tilingData);
+        op.Init(x, weight, y, &tilingData, &pipe);
         op.Process();
     }
     if constexpr (schMode == static_cast<uint32_t>(PreluTilingKey::TILING_KEY_PRELU_MODE_1)) {
         NsPrelu::Prelu<float> op;
-        op.Init(x, weight, y, &tilingData);
+        op.Init(x, weight, y, &tilingData, &pipe);
         op.Process();
     }
 }

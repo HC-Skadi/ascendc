@@ -22,7 +22,8 @@ class Prelu {
 public:
     __aicore__ inline Prelu(){};
 
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData);
+    __aicore__ inline void Init(
+        GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, AscendC::TPipe* pipeIn);
     __aicore__ inline void Process();
 
 private:
@@ -35,7 +36,7 @@ private:
                                           int64_t localOffset, int64_t currentNum, float alpha);
 
 private:
-    TPipe pipe;
+    TPipe* pipe = nullptr;
     TQue<QuePosition::VECIN, BUFFER_NUM> inputQueueX;
     TQue<QuePosition::VECIN, 1> inputQueueWeight;
     TQue<QuePosition::VECOUT, BUFFER_NUM> outputQueueY;
@@ -53,11 +54,15 @@ private:
     int64_t weightMode_ = 0;
     int64_t channelSize_ = 1;
     int64_t innerSize_ = 1;
+    int64_t lastWeightOffset_ = -1;
+    float lastAlpha_ = 0.0f;
 };
 
 template <typename T>
-__aicore__ inline void Prelu<T>::Init(GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData)
+__aicore__ inline void Prelu<T>::Init(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, AscendC::TPipe* pipeIn)
 {
+    pipe = pipeIn;
     int64_t blockIdx = AscendC::GetBlockIdx();
     int64_t remainLength = tilingData->totalNum - tilingData->blockFactor * blockIdx;
     blockLength_ = remainLength > tilingData->blockFactor ? tilingData->blockFactor : remainLength;
@@ -67,17 +72,19 @@ __aicore__ inline void Prelu<T>::Init(GM_ADDR x, GM_ADDR weight, GM_ADDR y, cons
     weightMode_ = tilingData->weightMode;
     channelSize_ = tilingData->channelSize;
     innerSize_ = tilingData->innerSize;
+    lastWeightOffset_ = -1;
+    lastAlpha_ = 0.0f;
 
     inputGMX.SetGlobalBuffer((__gm__ T*)x + blockOffset_, blockLength_);
     weightGM.SetGlobalBuffer((__gm__ T*)weight);
     outputGMY.SetGlobalBuffer((__gm__ T*)y + blockOffset_, blockLength_);
 
-    pipe.InitBuffer(inputQueueX, BUFFER_NUM, ubLength_ * sizeof(T));
-    pipe.InitBuffer(inputQueueWeight, 1, 32);
-    pipe.InitBuffer(outputQueueY, BUFFER_NUM, ubLength_ * sizeof(T));
-    pipe.InitBuffer(xFp32Buf, ubLength_ * sizeof(float));
-    pipe.InitBuffer(posBuf, ubLength_ * sizeof(float));
-    pipe.InitBuffer(negBuf, ubLength_ * sizeof(float));
+    pipe->InitBuffer(inputQueueX, BUFFER_NUM, ubLength_ * sizeof(T));
+    pipe->InitBuffer(inputQueueWeight, 1, 32);
+    pipe->InitBuffer(outputQueueY, BUFFER_NUM, ubLength_ * sizeof(T));
+    pipe->InitBuffer(xFp32Buf, ubLength_ * sizeof(float));
+    pipe->InitBuffer(posBuf, ubLength_ * sizeof(float));
+    pipe->InitBuffer(negBuf, ubLength_ * sizeof(float));
 }
 
 template <typename T>
@@ -100,6 +107,9 @@ __aicore__ inline float Prelu<T>::GetAlpha(int64_t globalOffset)
     if (weightMode_ == 1) {
         weightOffset = (globalOffset / innerSize_) % channelSize_;
     }
+    if (weightOffset == lastWeightOffset_) {
+        return lastAlpha_;
+    }
 
     AscendC::LocalTensor<T> weightLocal = inputQueueWeight.template AllocTensor<T>();
     AscendC::DataCopyParams copyParams;
@@ -112,7 +122,9 @@ __aicore__ inline float Prelu<T>::GetAlpha(int64_t globalOffset)
     weightLocal = inputQueueWeight.template DeQue<T>();
     float alpha = static_cast<float>(weightLocal.GetValue(0));
     inputQueueWeight.FreeTensor(weightLocal);
-    return alpha;
+    lastWeightOffset_ = weightOffset;
+    lastAlpha_ = alpha;
+    return lastAlpha_;
 }
 
 template <typename T>
@@ -190,9 +202,18 @@ template <typename T>
 __aicore__ inline void Prelu<T>::Process()
 {
     int64_t loopCount = (blockLength_ + ubLength_ - 1) / ubLength_;
+    if (loopCount <= 0) {
+        return;
+    }
+
+    int64_t firstNum = loopCount == 1 ? blockLength_ : ubLength_;
+    CopyIn(0, firstNum);
     for (int64_t i = 0; i < loopCount; ++i) {
         int64_t currentNum = (i == loopCount - 1) ? (blockLength_ - ubLength_ * i) : ubLength_;
-        CopyIn(i, currentNum);
+        if (i + 1 < loopCount) {
+            int64_t nextNum = (i + 1 == loopCount - 1) ? (blockLength_ - ubLength_ * (i + 1)) : ubLength_;
+            CopyIn(i + 1, nextNum);
+        }
         Compute(i, currentNum);
         CopyOut(i, currentNum);
     }
