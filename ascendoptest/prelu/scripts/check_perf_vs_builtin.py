@@ -23,6 +23,8 @@ def main():
     rows = load_rows(args.csv)
     grouped = defaultdict(dict)
     for row in rows:
+        if row["time_use"] == "NA":
+            continue
         case_name_raw = row["case_name"]
         # strip timestamp suffix if present
         case_name = case_name_raw[:-15] if len(case_name_raw) > 15 else case_name_raw
