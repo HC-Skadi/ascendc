@@ -82,3 +82,4 @@ aclnn_*_perf/
 op_test/
 prof/
 test/
+op_test.py/
