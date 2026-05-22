@@ -13,16 +13,18 @@
  * \brief
  */
 
-#include "log/log.h"
-#include "util/math_util.h"
-#include "op_host/tiling_util.h"
-#include "op_host/tiling_templates_registry.h"
-#include "prelu/op_kernel/prelu_tiling_data.h"
-#include "prelu/op_kernel/prelu_tiling_key.h"
+#include "register/op_def_registry.h"           // 提供 gert::TilingContext
+#include "op_common/log/log.h"
+#include "op_common/op_host/util/math_util.h"
+#include "op_common/op_host/util/platform_util.h"
+#include "../op_kernel/prelu_tiling_data.h"
+#include "../op_kernel/prelu_tiling_key.h"
+#include "graph/utils/type_utils.h"
+
 
 namespace optiling {
 
-using namespace Ops::NN::OpTiling;
+// using namespace Ops::NN::OpTiling;
 const uint32_t BLOCK_SIZE = 32;
 const uint32_t BUFFER_NUM = 2;
 const uint32_t WS_SYS_SIZE = 0;
