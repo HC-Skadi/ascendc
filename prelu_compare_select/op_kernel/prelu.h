@@ -155,7 +155,7 @@ __aicore__ inline void Prelu<T>::Compute(uint32_t currentNum)
         Muls(prod, xFp32, weightValFp32, compareLength);
         Duplicate(zero, 0.0f, compareLength);
         Compare(mask, xFp32, zero, CMPMODE::GT, compareLength);
-        Select(xFp32, mask, xFp32, prod, SELMODE::VSEL_CMPMASK_SPR, compareLength);
+        Select(xFp32, mask, xFp32, prod, SELMODE::VSEL_TENSOR_TENSOR_MODE, compareLength);
         Cast(yLocal, xFp32, RoundMode::CAST_RINT, currentNum);
     } else {
         uint32_t compareLength = AlignCompareLength<T>(currentNum);
@@ -168,7 +168,7 @@ __aicore__ inline void Prelu<T>::Compute(uint32_t currentNum)
         Muls(prod, xLocal, weightVal, compareLength);
         Duplicate(zero, static_cast<T>(0), compareLength);
         Compare(mask, xLocal, zero, CMPMODE::GT, compareLength);
-        Select(yLocal, mask, xLocal, prod, SELMODE::VSEL_CMPMASK_SPR, compareLength);
+        Select(yLocal, mask, xLocal, prod, SELMODE::VSEL_TENSOR_TENSOR_MODE, compareLength);
     }
 
     outputQueueY.EnQue<T>(yLocal);
