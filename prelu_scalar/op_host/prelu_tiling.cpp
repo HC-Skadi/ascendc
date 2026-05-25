@@ -35,8 +35,9 @@ static ge::graphStatus GetPlatformInfo(gert::TilingContext* context, uint64_t& u
 static ge::graphStatus GetWorkspaceSize(gert::TilingContext* context)
 {
     size_t* currentWorkspace = context->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, currentWorkspace);
-    currentWorkspace[0] = WS_SYS_SIZE;
+    if (currentWorkspace != nullptr) {
+        currentWorkspace[0] = WS_SYS_SIZE;
+    }
     return ge::GRAPH_SUCCESS;
 }
 
