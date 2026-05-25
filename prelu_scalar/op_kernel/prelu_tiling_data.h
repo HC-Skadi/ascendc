@@ -6,9 +6,15 @@
 #ifndef _PRELU_TILING_DATA_H_
 #define _PRELU_TILING_DATA_H_
 
+#include <cstdint>
+
 struct PreluTilingData {
-    int64_t totalNum = 0;     // 总元素数量
-    int64_t blockFactor = 0;  // 每个核处理的元素数量
-    int64_t ubFactor = 0;     // 每次 UB 循环处理的元素数量
+    int64_t totalLength = 0;   // 总元素数量
+    int64_t usedCoreNum = 0;   // 实际使用的 AIV 核数
+    int64_t formerNum = 0;     // 使用 formerLength 的核数
+    int64_t formerLength = 0;  // 前段每核处理的元素数量
+    int64_t tailNum = 0;       // 使用 tailLength 的尾段核数
+    int64_t tailLength = 0;    // 尾段每核处理的元素数量
+    int64_t tileLength = 0;    // 每次 UB 循环处理的元素数量
 };
 #endif

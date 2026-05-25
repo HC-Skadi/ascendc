@@ -12,7 +12,6 @@ namespace ops {
 
 static ge::graphStatus InferShapePrelu(gert::InferShapeContext* context)
 {
-    // TODO: 实现形状推导逻辑
     const gert::Shape* input_shape = context->GetInputShape(0);
     if (input_shape == nullptr) {
         return ge::GRAPH_FAILED;

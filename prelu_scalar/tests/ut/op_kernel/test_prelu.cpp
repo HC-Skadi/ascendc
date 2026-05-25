@@ -38,10 +38,10 @@ TEST_F(PreluKernelTest, test_kernel_run)
     constexpr uint32_t numBlocks = 1;
 
     constexpr size_t xByteSize = size * sizeof(float);
-    constexpr size_t weightByteSize = size * sizeof(float);
+    constexpr size_t weightByteSize = sizeof(float);
     constexpr size_t yByteSize = size * sizeof(float);
-    std::vector<float> xHost(size, 1);
-    std::vector<float> weightHost(size, 1);
+    std::vector<float> xHost = {-3.0f, -1.0f, 0.0f, 1.0f, 2.0f, -4.0f, 5.0f};
+    std::vector<float> weightHost = {0.25f};
     std::vector<float> yHost(size, 0.0f);
     
     uint8_t* x = (uint8_t*)AscendC::GmAlloc(xByteSize);
@@ -55,14 +55,24 @@ TEST_F(PreluKernelTest, test_kernel_run)
     
     // 直接构造 tilingData（固定值，生成时确定）
     PreluTilingData* tilingData = reinterpret_cast<PreluTilingData*>(tiling);
-    tilingData->totalNum = size;
-    tilingData->blockFactor = size;
-    tilingData->ubFactor = size;
+    tilingData->totalLength = size;
+    tilingData->usedCoreNum = numBlocks;
+    tilingData->formerNum = 0;
+    tilingData->formerLength = size;
+    tilingData->tailNum = 1;
+    tilingData->tailLength = size;
+    tilingData->tileLength = size;
     
     ICPU_SET_TILING_KEY(0);
     AscendC::SetKernelMode(KernelMode::AIV_MODE);
     
     ICPU_RUN_KF((prelu<0>), numBlocks, x, weight, y, workspace, tiling);
+
+    memcpy(yHost.data(), y, yByteSize);
+    std::vector<float> expected = {-0.75f, -0.25f, 0.0f, 1.0f, 2.0f, -1.0f, 5.0f};
+    for (size_t i = 0; i < size; ++i) {
+        EXPECT_NEAR(yHost[i], expected[i], 1e-6f);
+    }
     
     AscendC::GmFree(x);
     AscendC::GmFree(weight);
