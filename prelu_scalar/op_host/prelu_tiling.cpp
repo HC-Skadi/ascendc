@@ -4,6 +4,7 @@
  */
 
 #include "register/op_def_registry.h"
+#include "graph/utils/type_utils.h"
 #include "op_common/log/log.h"
 #include "op_common/op_host/util/math_util.h"
 #include "op_common/op_host/util/platform_util.h"

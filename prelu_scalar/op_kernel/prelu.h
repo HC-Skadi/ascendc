@@ -23,7 +23,7 @@ template <typename T>
 __aicore__ inline void CopyGmToLocalPad(LocalTensor<T>& dst, const GlobalTensor<T>& src, uint32_t dataNum)
 {
     DataCopyExtParams copyParams{1, static_cast<uint32_t>(dataNum * sizeof(T)), 0, 0, 0};
-    DataCopyPadExtParams<T> padParams{false, 0, 0, static_cast<T>(0)};
+    DataCopyPadExtParams<T> padParams{false, 0, 0, 0};
     DataCopyPad(dst, src, copyParams, padParams);
 }
 
@@ -64,6 +64,13 @@ private:
     int64_t ubLength = 0;
 };
 
+__aicore__ inline float LoadBf16ScalarAsFloat(GM_ADDR weight)
+{
+    uint16_t weightBits = *((__gm__ uint16_t*)weight);
+    uint32_t floatBits = static_cast<uint32_t>(weightBits) << 16;
+    return *reinterpret_cast<float*>(&floatBits);
+}
+
 template <typename T>
 __aicore__ inline void Prelu<T>::Init(
     GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe)
@@ -83,10 +90,10 @@ __aicore__ inline void Prelu<T>::Init(
     inputGMX.SetGlobalBuffer((__gm__ T*)x + blockOffset, blockLength);
     outputGMY.SetGlobalBuffer((__gm__ T*)y + blockOffset, blockLength);
 
-    T scalarWeight = *((__gm__ T*)weight);
     if constexpr (std::is_same_v<T, bfloat16_t>) {
-        weightValFp32 = static_cast<float>(scalarWeight);
+        weightValFp32 = LoadBf16ScalarAsFloat(weight);
     } else {
+        T scalarWeight = *((__gm__ T*)weight);
         weightVal = scalarWeight;
     }
 
