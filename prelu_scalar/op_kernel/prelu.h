@@ -91,7 +91,8 @@ __aicore__ inline void Prelu<T>::Init(
     outputGMY.SetGlobalBuffer((__gm__ T*)y + blockOffset, blockLength);
 
     if constexpr (std::is_same_v<T, bfloat16_t>) {
-        weightValFp32 = LoadBf16ScalarAsFloat(weight);
+        T scalarWeight = *((__gm__ T*)weight);
+        weightValFp32 =  AscendC::Cast(scalarWeight);
     } else {
         T scalarWeight = *((__gm__ T*)weight);
         weightVal = scalarWeight;
