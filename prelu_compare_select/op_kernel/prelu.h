@@ -149,9 +149,6 @@ __aicore__ inline void Prelu<T>::Compute(uint32_t currentNum)
         LocalTensor<float> zero = tmpBufZero.Get<float>();
         LocalTensor<uint8_t> mask = tmpBufMask.Get<uint8_t>();
         Cast(xFp32, xLocal, RoundMode::CAST_NONE, currentNum);
-        if (compareLength > currentNum) {
-            Duplicate(xFp32[currentNum], 0.0f, compareLength - currentNum);
-        }
         Muls(prod, xFp32, weightValFp32, compareLength);
         Duplicate(zero, 0.0f, compareLength);
         Compare(mask, xFp32, zero, CMPMODE::GT, compareLength);
@@ -162,9 +159,6 @@ __aicore__ inline void Prelu<T>::Compute(uint32_t currentNum)
         LocalTensor<T> prod = tmpBufProd.Get<T>();
         LocalTensor<T> zero = tmpBufZero.Get<T>();
         LocalTensor<uint8_t> mask = tmpBufMask.Get<uint8_t>();
-        if (compareLength > currentNum) {
-            Duplicate(xLocal[currentNum], static_cast<T>(0), compareLength - currentNum);
-        }
         Muls(prod, xLocal, weightVal, compareLength);
         Duplicate(zero, static_cast<T>(0), compareLength);
         Compare(mask, xLocal, zero, CMPMODE::GT, compareLength);
