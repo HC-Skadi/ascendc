@@ -20,21 +20,6 @@ using namespace AscendC;
 constexpr int32_t BUFFER_NUM = 2;
 
 template <typename T>
-__aicore__ inline void CopyGmToLocalPad(LocalTensor<T>& dst, const GlobalTensor<T>& src, uint32_t dataNum)
-{
-    DataCopyExtParams copyParams{1, static_cast<uint32_t>(dataNum * sizeof(T)), 0, 0, 0};
-    DataCopyPadExtParams<T> padParams{false, 0, 0, 0};
-    DataCopyPad(dst, src, copyParams, padParams);
-}
-
-template <typename T>
-__aicore__ inline void CopyLocalToGmPad(const GlobalTensor<T>& dst, const LocalTensor<T>& src, uint32_t dataNum)
-{
-    DataCopyExtParams copyParams{1, static_cast<uint32_t>(dataNum * sizeof(T)), 0, 0, 0};
-    DataCopyPad(dst, src, copyParams);
-}
-
-template <typename T>
 class Prelu {
 public:
     __aicore__ inline Prelu() {}
@@ -114,7 +99,7 @@ template <typename T>
 __aicore__ inline void Prelu<T>::CopyIn(int64_t progress, uint32_t currentNum)
 {
     LocalTensor<T> xLocal = inputQueueX.AllocTensor<T>();
-    CopyGmToLocalPad(xLocal, inputGMX[progress * ubLength], currentNum);
+    DataCopy(xLocal, inputGMX[progress * ubLength], currentNum);
     inputQueueX.EnQue(xLocal);
 }
 
@@ -122,7 +107,7 @@ template <typename T>
 __aicore__ inline void Prelu<T>::CopyOut(int64_t progress, uint32_t currentNum)
 {
     LocalTensor<T> yLocal = outputQueueY.DeQue<T>();
-    CopyLocalToGmPad(outputGMY[progress * ubLength], yLocal, currentNum);
+    DataCopy(outputGMY[progress * ubLength], yLocal, currentNum);
     outputQueueY.FreeTensor(yLocal);
 }
 
