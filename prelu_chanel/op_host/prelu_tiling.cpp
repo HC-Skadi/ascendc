@@ -41,29 +41,19 @@ static ge::graphStatus GetWorkspaceSize(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus CheckScalarWeight(gert::TilingContext* context)
-{
-    auto weightShape = context->GetInputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, weightShape);
-    auto storageShape = weightShape->GetStorageShape();
-    OP_CHECK_IF(
-        storageShape.GetDimNum() != 1 || storageShape.GetDim(0) != 1,
-        OP_LOGE(
-            context, "Prelu: only scalar weight with shape [1] is supported, got dim num %zu, dim0 %ld",
-            storageShape.GetDimNum(), storageShape.GetDimNum() == 0 ? 0 : storageShape.GetDim(0)),
-        return ge::GRAPH_FAILED);
-    return ge::GRAPH_SUCCESS;
-}
-
 static ge::graphStatus GetShapeAndDtypeInfo(
-    gert::TilingContext* context, int64_t& totalNum, ge::DataType& dataType, uint32_t& typeLength)
+    gert::TilingContext* context, int64_t& totalNum, int64_t& weightSize, int64_t& weightMode,
+    int64_t& channelSize, int64_t& innerSize, int64_t& rowNum, ge::DataType& dataType, uint32_t& typeLength)
 {
     auto inputX = context->GetInputShape(0);
     OP_CHECK_NULL_WITH_CONTEXT(context, inputX);
+    auto inputWeight = context->GetInputShape(1);
+    OP_CHECK_NULL_WITH_CONTEXT(context, inputWeight);
     auto outputY = context->GetOutputShape(0);
     OP_CHECK_NULL_WITH_CONTEXT(context, outputY);
 
     auto xShape = inputX->GetStorageShape();
+    auto wShape = inputWeight->GetStorageShape();
     auto yShape = outputY->GetStorageShape();
     OP_CHECK_IF(
         xShape.GetDimNum() != yShape.GetDimNum(), OP_LOGE(context, "Prelu: x/y rank mismatch"),
@@ -92,6 +82,45 @@ static ge::graphStatus GetShapeAndDtypeInfo(
     ge::TypeUtils::GetDataTypeLength(dataType, typeLength);
     OP_CHECK_IF(typeLength == 0, OP_LOGE(context, "Prelu: dtype length is 0"), return ge::GRAPH_FAILED);
 
+    OP_CHECK_IF(
+        wShape.GetDimNum() != 1,
+        OP_LOGE(context, "Prelu: weight must be 1-D, got dim num %zu", wShape.GetDimNum()),
+        return ge::GRAPH_FAILED);
+    weightSize = wShape.GetDim(0);
+    OP_CHECK_IF(weightSize <= 0, OP_LOGE(context, "Prelu: weight size must be positive"), return ge::GRAPH_FAILED);
+
+    weightMode = 0;
+    channelSize = 1;
+    innerSize = 1;
+    rowNum = 0;
+    if (weightSize != 1) {
+        OP_CHECK_IF(
+            xShape.GetDimNum() < 2,
+            OP_LOGE(context, "Prelu: channel weight requires x rank >= 2"),
+            return ge::GRAPH_FAILED);
+        channelSize = xShape.GetDim(1);
+        OP_CHECK_IF(
+            channelSize <= 0,
+            OP_LOGE(context, "Prelu: channel size must be positive, got %ld", channelSize),
+            return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            weightSize != channelSize,
+            OP_LOGE(context, "Prelu: weight size must be 1 or match channel size, weight size=%ld, channel size=%ld",
+                    weightSize, channelSize),
+            return ge::GRAPH_FAILED);
+
+        innerSize = 1;
+        for (size_t i = 2; i < xShape.GetDimNum(); ++i) {
+            OP_CHECK_IF(
+                xShape.GetDim(i) <= 0,
+                OP_LOGE(context, "Prelu: x dim %zu must be positive, got %ld", i, xShape.GetDim(i)),
+                return ge::GRAPH_FAILED);
+            innerSize *= xShape.GetDim(i);
+        }
+        rowNum = xShape.GetDim(0) * channelSize;
+        weightMode = 1;
+    }
+
     totalNum = inputX->GetOriginShape().GetShapeSize();
     return ge::GRAPH_SUCCESS;
 }
@@ -114,43 +143,74 @@ static uint64_t CeilDiv(uint64_t value, uint64_t factor)
 
 static ge::graphStatus CalcTiling(
     gert::TilingContext* context, uint64_t ubSize, int64_t coreNum, int64_t totalNum, ge::DataType dataType,
-    uint32_t typeLength, PreluTilingData* tiling, uint32_t& usedCoreNum)
+    uint32_t typeLength, int64_t weightSize, int64_t weightMode, int64_t channelSize, int64_t innerSize,
+    int64_t rowNum, PreluTilingData* tiling, uint32_t& usedCoreNum)
 {
     uint64_t bufferBytesPerElement = GetBufferBytesPerElement(dataType);
     uint64_t usableUbSize = (ubSize > UB_RESERVED_SIZE) ? (ubSize - UB_RESERVED_SIZE) : ubSize;
     uint64_t blockElementNum = BLOCK_SIZE / typeLength;
-    uint64_t coreAlignElementNum = CORE_ALIGN_SIZE / typeLength;
     uint64_t maxTileElements = usableUbSize / bufferBytesPerElement;
     OP_CHECK_IF(
         maxTileElements < blockElementNum, OP_LOGE(context, "Prelu: UB is too small for one aligned tile"),
         return ge::GRAPH_FAILED);
 
     uint64_t ubFactor = (maxTileElements / blockElementNum) * blockElementNum;
-    uint64_t coreLimit = static_cast<uint64_t>(coreNum);
-    uint64_t totalCoreElements = CeilDiv(static_cast<uint64_t>(totalNum), coreLimit);
-    uint64_t blockFactor = (CeilDiv(totalCoreElements, coreAlignElementNum)) * coreAlignElementNum;
-    if (blockFactor == 0) {
-        blockFactor = coreAlignElementNum;
-    }
-    uint64_t finalCoreNum = static_cast<uint64_t>(totalNum) == 0 ? 1U : CeilDiv(static_cast<uint64_t>(totalNum), blockFactor);
-    finalCoreNum = std::min(coreLimit, finalCoreNum);
-
-    uint64_t tailLength = 0;
-    uint64_t formerNum = 0;
-    uint64_t tailNum = 0;
-    if (totalNum > 0) {
-        formerNum = finalCoreNum > 0 ? finalCoreNum - 1U : 0U;
-        tailNum = 1U;
-        tailLength = static_cast<uint64_t>(totalNum) - formerNum * blockFactor;
-    }
 
     tiling->totalLength = totalNum;
-    tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
-    tiling->formerNum = static_cast<int64_t>(formerNum);
-    tiling->formerLength = static_cast<int64_t>(blockFactor);
-    tiling->tailNum = static_cast<int64_t>(tailNum);
-    tiling->tailLength = static_cast<int64_t>(tailLength);
     tiling->tileLength = static_cast<int64_t>(ubFactor);
+    tiling->weightSize = weightSize;
+    tiling->weightMode = weightMode;
+    tiling->channelSize = channelSize;
+    tiling->innerSize = innerSize;
+    tiling->innerSizeAligned = innerSize;
+    tiling->rowNum = rowNum;
+    tiling->baseRows = 0;
+    tiling->extraRows = 0;
+
+    uint64_t coreLimit = static_cast<uint64_t>(coreNum);
+    if (weightMode == 0) {
+        uint64_t coreAlignElementNum = CORE_ALIGN_SIZE / typeLength;
+        uint64_t totalCoreElements = CeilDiv(static_cast<uint64_t>(totalNum), coreLimit);
+        uint64_t blockFactor = (CeilDiv(totalCoreElements, coreAlignElementNum)) * coreAlignElementNum;
+        if (blockFactor == 0) {
+            blockFactor = coreAlignElementNum;
+        }
+        uint64_t finalCoreNum = static_cast<uint64_t>(totalNum) == 0 ? 1U : CeilDiv(static_cast<uint64_t>(totalNum), blockFactor);
+        finalCoreNum = std::min(coreLimit, finalCoreNum);
+
+        uint64_t tailLength = 0;
+        uint64_t formerNum = 0;
+        uint64_t tailNum = 0;
+        if (totalNum > 0) {
+            formerNum = finalCoreNum > 0 ? finalCoreNum - 1U : 0U;
+            tailNum = 1U;
+            tailLength = static_cast<uint64_t>(totalNum) - formerNum * blockFactor;
+        }
+
+        tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
+        tiling->formerNum = static_cast<int64_t>(formerNum);
+        tiling->formerLength = static_cast<int64_t>(blockFactor);
+        tiling->tailNum = static_cast<int64_t>(tailNum);
+        tiling->tailLength = static_cast<int64_t>(tailLength);
+        usedCoreNum = static_cast<uint32_t>(finalCoreNum);
+        return ge::GRAPH_SUCCESS;
+    }
+
+    uint64_t innerSizeAligned = CeilDiv(static_cast<uint64_t>(innerSize), blockElementNum) * blockElementNum;
+    OP_CHECK_IF(
+        innerSizeAligned > ubFactor,
+        OP_LOGE(context, "Prelu: aligned L must be less than or equal to tileLength for channel weight"),
+        return ge::GRAPH_FAILED);
+    uint64_t rowNumU64 = static_cast<uint64_t>(rowNum);
+    uint64_t finalCoreNum = rowNumU64 == 0 ? 1U : std::min(coreLimit, rowNumU64);
+    tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
+    tiling->formerNum = 0;
+    tiling->formerLength = 0;
+    tiling->tailNum = 0;
+    tiling->tailLength = 0;
+    tiling->innerSizeAligned = static_cast<int64_t>(innerSizeAligned);
+    tiling->baseRows = static_cast<int64_t>(rowNumU64 / finalCoreNum);
+    tiling->extraRows = static_cast<int64_t>(rowNumU64 % finalCoreNum);
     usedCoreNum = static_cast<uint32_t>(finalCoreNum);
     return ge::GRAPH_SUCCESS;
 }
@@ -169,16 +229,17 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
         OP_LOGE(context, "GetWorkspaceSize error"),
         return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(
-        CheckScalarWeight(context) != ge::GRAPH_SUCCESS,
-        OP_LOGE(context, "CheckScalarWeight error"),
-        return ge::GRAPH_FAILED);
-
     int64_t totalNum = 0;
+    int64_t weightSize = 1;
+    int64_t weightMode = 0;
+    int64_t channelSize = 1;
+    int64_t innerSize = 1;
+    int64_t rowNum = 0;
     ge::DataType dataType = ge::DT_FLOAT;
     uint32_t typeLength = 0;
     OP_CHECK_IF(
-        GetShapeAndDtypeInfo(context, totalNum, dataType, typeLength) != ge::GRAPH_SUCCESS,
+        GetShapeAndDtypeInfo(context, totalNum, weightSize, weightMode, channelSize, innerSize, rowNum, dataType, typeLength) !=
+            ge::GRAPH_SUCCESS,
         OP_LOGE(context, "GetShapeAndDtypeInfo error"),
         return ge::GRAPH_FAILED);
 
@@ -187,7 +248,8 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
 
     uint32_t usedCoreNum = 1;
     OP_CHECK_IF(
-        CalcTiling(context, ubSize, coreNum, totalNum, dataType, typeLength, tiling, usedCoreNum) != ge::GRAPH_SUCCESS,
+        CalcTiling(context, ubSize, coreNum, totalNum, dataType, typeLength, weightSize, weightMode, channelSize,
+            innerSize, rowNum, tiling, usedCoreNum) != ge::GRAPH_SUCCESS,
         OP_LOGE(context, "CalcTiling error"),
         return ge::GRAPH_FAILED);
 

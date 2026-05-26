@@ -62,6 +62,14 @@ TEST_F(PreluKernelTest, test_kernel_run)
     tilingData->tailNum = 1;
     tilingData->tailLength = size;
     tilingData->tileLength = size;
+    tilingData->weightSize = 1;
+    tilingData->weightMode = 0;
+    tilingData->channelSize = 1;
+    tilingData->innerSize = 1;
+    tilingData->innerSizeAligned = 1;
+    tilingData->rowNum = 0;
+    tilingData->baseRows = 0;
+    tilingData->extraRows = 0;
     
     ICPU_SET_TILING_KEY(0);
     AscendC::SetKernelMode(KernelMode::AIV_MODE);
@@ -74,6 +82,73 @@ TEST_F(PreluKernelTest, test_kernel_run)
         EXPECT_NEAR(yHost[i], expected[i], 1e-6f);
     }
     
+    AscendC::GmFree(x);
+    AscendC::GmFree(weight);
+    AscendC::GmFree(y);
+    AscendC::GmFree(workspace);
+    AscendC::GmFree(tiling);
+}
+
+TEST_F(PreluKernelTest, test_channel_weight_run)
+{
+    constexpr size_t n = 2;
+    constexpr size_t c = 3;
+    constexpr size_t l = 5;
+    constexpr size_t size = n * c * l;
+    constexpr size_t tilingDataSize = sizeof(PreluTilingData);
+    constexpr uint32_t numBlocks = 1;
+
+    constexpr size_t xByteSize = size * sizeof(float);
+    constexpr size_t weightByteSize = c * sizeof(float);
+    constexpr size_t yByteSize = size * sizeof(float);
+    std::vector<float> xHost(size);
+    for (size_t i = 0; i < size; ++i) {
+        xHost[i] = static_cast<float>(static_cast<int>(i % 7) - 3);
+    }
+    std::vector<float> weightHost = {0.1f, 0.2f, 0.3f};
+    std::vector<float> yHost(size, 0.0f);
+
+    uint8_t* x = (uint8_t*)AscendC::GmAlloc(xByteSize);
+    uint8_t* weight = (uint8_t*)AscendC::GmAlloc(weightByteSize);
+    uint8_t* y = (uint8_t*)AscendC::GmAlloc(yByteSize);
+    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(32);
+    uint8_t* tiling = (uint8_t*)AscendC::GmAlloc(tilingDataSize);
+
+    memcpy(x, xHost.data(), xByteSize);
+    memcpy(weight, weightHost.data(), weightByteSize);
+
+    PreluTilingData* tilingData = reinterpret_cast<PreluTilingData*>(tiling);
+    tilingData->totalLength = size;
+    tilingData->usedCoreNum = numBlocks;
+    tilingData->formerNum = 0;
+    tilingData->formerLength = 0;
+    tilingData->tailNum = 0;
+    tilingData->tailLength = 0;
+    tilingData->tileLength = 8;
+    tilingData->weightSize = c;
+    tilingData->weightMode = 1;
+    tilingData->channelSize = c;
+    tilingData->innerSize = l;
+    tilingData->innerSizeAligned = 8;
+    tilingData->rowNum = n * c;
+    tilingData->baseRows = n * c;
+    tilingData->extraRows = 0;
+
+    ICPU_SET_TILING_KEY(0);
+    AscendC::SetKernelMode(KernelMode::AIV_MODE);
+
+    ICPU_RUN_KF((prelu<0>), numBlocks, x, weight, y, workspace, tiling);
+
+    memcpy(yHost.data(), y, yByteSize);
+    for (size_t row = 0; row < n * c; ++row) {
+        float weightValue = weightHost[row % c];
+        for (size_t i = 0; i < l; ++i) {
+            size_t offset = row * l + i;
+            float expected = xHost[offset] > 0.0f ? xHost[offset] : xHost[offset] * weightValue;
+            EXPECT_NEAR(yHost[offset], expected, 1e-6f);
+        }
+    }
+
     AscendC::GmFree(x);
     AscendC::GmFree(weight);
     AscendC::GmFree(y);
