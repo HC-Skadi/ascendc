@@ -1,417 +1,488 @@
-# PReLU 算子设计文档
+# PReLU Scalar/Channel 算子设计文档
 
 ## 1. 算子接口
 
 ### 1.1 函数签名
 
 ```cpp
-at::Tensor prelu(
-    const at::Tensor &self,
-    const at::Tensor &weight
-);
+Prelu(x, weight) -> y
 ```
 
-### 1.2 参数说明
+`prelu_scalar` 当前是 CANN 自定义算子工程，接口由 `op_host/prelu_def.cpp` 注册：
 
 | 参数名 | 类型 | 输入/输出 | 支持的数据类型 | 描述 | 约束条件 |
 |--------|------|-----------|----------------|------|----------|
-| self | at::Tensor | 输入 | bfloat16/float16/float32 | 输入 tensor | 支持 ND，建议 contiguous；空 tensor 直接返回 empty_like |
-| weight | at::Tensor | 输入 | bfloat16/float16/float32 | 负半轴斜率参数 | dtype/device 与 self 一致；PyTorch 语义下 `numel == 1` 或 `self.dim() >= 2 && numel == self.size(1)` |
-| output | at::Tensor | 输出 | bfloat16/float16/float32 | 输出 tensor | shape 与 self 一致 |
+| x | Tensor | 输入 | float16/float32/bfloat16 | 输入 tensor | scalar weight 支持 ND；channel weight 支持 rank >= 2，按 `[N, C, ...]` 解析 |
+| weight | Tensor | 输入 | float16/float32/bfloat16 | PReLU 负半轴斜率 | 支持 shape `[1]` 或 `[C]` |
+| y | Tensor | 输出 | float16/float32/bfloat16 | 输出 tensor | shape 与 x 一致 |
 
-### 1.3 支持的数据类型
+### 1.2 支持的数据类型
 
-- [x] bfloat16
 - [x] float16
 - [x] float32
+- [x] bfloat16
 
-### 1.4 PyTorch 语义对齐
+`x`、`weight`、`y` 的 dtype 必须一致。保留 scalar weight `[1]` 路径，并新增 channel weight `[C]` 路径。
 
-对齐 `torch.prelu(input, weight)`：
+### 1.3 Shape 语义
 
-```text
-y = max(0, x) + weight * min(0, x)
-```
-
-- `weight.numel() == 1`：所有元素共用同一个负半轴斜率。
-- `weight.numel() == C`：`C == self.size(1)`，按通道广播，通道维固定为 `dim=1`。
-- 输入为 1D 时只支持 `weight.numel() == 1`。
-
-本地环境未安装 PyTorch，无法通过 `inspect.signature(torch.prelu)` 直接校验签名；上述签名按 PyTorch 公共接口语义设计。
-
-### 1.5 TBE 参考实现语义
-
-参考 `/Users/hc/Downloads/prelu_tbe.py`：
-
-- dtype 支持 `float16`、`float32`、`bfloat16`，且 `x` 与 `weight` dtype 必须一致。
-- TBE 使用 `ELEWISE_WITH_BROADCAST` 分类，先将 `weight` broadcast 到 `x` shape，再执行 PReLU。
-- 常见格式包含 `ND/NCHW/NC1HWC0/NDC1HWC0/FRACTAL_NZ`。AscendC 首版默认按 contiguous ND 实现；如果要完全覆盖 5HD/NZ，应在 Host 侧转为等价 contiguous 视图，或扩展 stride/broadcast tiling。
-- 新平台计算路径为 `prod = x * weight; y = select(x > 0, x, prod)`；旧平台路径为 `max(x,0) + weight * min(x,0)`。两者数学等价，`select` 路径更少临时 buffer 和 vector 指令。
+- 输出 shape 直接继承输入 `x` shape。
+- Host tiling 阶段校验 `x` 与 `y` storage shape 完全一致。
+- `weight` 为 `[1]` 时，所有元素共用 `weight[0]`，输入 shape 仍按 ND flat 处理。
+- `weight` 为 `[C]` 时，输入 rank 必须大于等于 2，固定 `N = x.shape[0]`、`C = x.shape[1]`，`L = prod(x.shape[2:])`；当 rank 为 2 时 `L = 1`。
+- channel 路径按逻辑 `[N, C, L]` 展开，每个 `(n, c, :)` 连续 L 段共用 `weight[c]`。
+- channel weight 首版要求 `L <= tileLength`，一个 UB 循环一次处理完整 L 长度。
 
 ---
 
 ## 2. 计算逻辑
 
-### 2.1 算法描述
-
-PReLU 是逐元素激活算子，正数部分保持原值，负数部分乘以可学习参数 `weight`：
+### 2.1 数学公式
 
 ```text
-y = x > 0 ? x : x * weight
+y[n, c, l] = max(x[n, c, l], 0) + weight[c] * min(x[n, c, l], 0)
 ```
 
-实现分为三类路径：
+等价于：
 
-1. **标量 weight 路径**：`weight.numel()==1`，每个 tile 共用 `weight[0]`。
-2. **通道 weight 路径**：输入逻辑视为 `[outerSize, channelSize, innerSize]`，其中 `channelSize = self.size(1)`，`innerSize = prod(self.sizes()[2:])`，每个 `(n, c, *)` 连续片段使用 `weight[c]`。
-3. **TBE broadcast 扩展路径**：如需完全复刻 TBE 的 `broadcast_inputs_shape`，Host 侧将 `weight` 规整为与 `self` 等 rank 的 broadcast shape，Kernel 侧通过 `weightStride[]` 计算每个元素的 weight offset。首版建议先实现 PyTorch 语义的标量和通道路径。
-
-### 2.2 AscendC API 调用伪代码
-
-#### 推荐路径：Mul + Compare + Select
-
-```cpp
-// xLocal: float32 输入 tile
-// alpha: float32 标量，标量路径来自 weight[0]，通道路径来自 weight[channelIdx]
-Duplicate(alphaLocal, alpha, len);          // alphaLocal = weight
-Mul(prodLocal, xLocal, alphaLocal, len);    // prod = x * weight
-Duplicate(zeroLocal, 0.0f, len);
-Compare(mask, xLocal, zeroLocal, CMPMODE::GT, len);
-Select(yLocal, mask, xLocal, prodLocal, SELMODE::VSEL_TENSOR_TENSOR_MODE, len);
+```text
+y[n, c, l] = x[n, c, l] >= 0 ? x[n, c, l] : x[n, c, l] * weight[c]
 ```
 
-#### 兼容路径：Max/Min
+scalar weight `[1]` 是 channel 公式的特例，`weight[c]` 固定为 `weight[0]`。
+
+### 2.2 AscendC API 调用序列
+
+在 `prelu_scalar` 现有实现基础上扩展 channel weight。计算 API 仍使用 `Maxs + Mins + Muls + Add`，不生成 `weightLocal`，不使用 `Duplicate` 展开 weight。
+
+**float16/float32 路径：**
 
 ```cpp
-Duplicate(zeroLocal, 0.0f, len);
-Max(posLocal, xLocal, zeroLocal, len);      // pos = max(x, 0)
-Min(negLocal, xLocal, zeroLocal, len);      // neg = min(x, 0)
-Muls(negLocal, negLocal, alpha, len);       // neg = alpha * neg
-Add(yLocal, posLocal, negLocal, len);       // y = pos + neg
+LocalTensor<T> xLocal = inputQueueX.DeQue<T>();
+LocalTensor<T> yLocal = outputQueueY.AllocTensor<T>();
+LocalTensor<T> pos = tmpBufPos.Get<T>();
+LocalTensor<T> neg = tmpBufNeg.Get<T>();
+
+Maxs(pos, xLocal, static_cast<T>(0), currentNum);
+Mins(neg, xLocal, static_cast<T>(0), currentNum);
+Muls(neg, neg, weightVal, currentNum); // scalar 路径 weightVal=weight[0]；channel 路径 weightVal=weight[c]
+Add(yLocal, pos, neg, currentNum);
 ```
 
-#### float16/bfloat16 升精度流程
+**bfloat16 路径：**
 
 ```cpp
-// xLocalLow: float16/bfloat16 输入 tile
-// yLocalLow: float16/bfloat16 输出 tile
-Cast(xLocalFp32, xLocalLow, RoundMode::CAST_NONE, len);
+LocalTensor<bfloat16_t> xLocal = inputQueueX.DeQue<bfloat16_t>();
+LocalTensor<bfloat16_t> yLocal = outputQueueY.AllocTensor<bfloat16_t>();
+LocalTensor<float> xFp32 = tmpXFp32.Get<float>();
+LocalTensor<float> pos = tmpBufPos.Get<float>();
+LocalTensor<float> neg = tmpBufNeg.Get<float>();
 
-Duplicate(alphaLocal, alphaFp32, len);
-Mul(prodLocal, xLocalFp32, alphaLocal, len);
-Duplicate(zeroLocal, 0.0f, len);
-Compare(mask, xLocalFp32, zeroLocal, CMPMODE::GT, len);
-Select(yLocalFp32, mask, xLocalFp32, prodLocal, SELMODE::VSEL_TENSOR_TENSOR_MODE, len);
-
-Cast(yLocalLow, yLocalFp32, RoundMode::CAST_RINT, len);
+Cast(xFp32, xLocal, RoundMode::CAST_NONE, currentNum);
+Maxs(pos, xFp32, 0.0f, currentNum);
+Mins(neg, xFp32, 0.0f, currentNum);
+Muls(neg, neg, weightValFp32, currentNum); // channel 路径 currentNum=L
+Add(pos, pos, neg, currentNum);
+Cast(yLocal, pos, RoundMode::CAST_RINT, currentNum);
 ```
 
-#### 通道 weight 分段处理
+### 2.3 weight 读取
+
+scalar weight `[1]` 路径在 `Init` 阶段只读取一次 `weight[0]`：
 
 ```cpp
-int64_t tileGlobalOffset = blockOffset + progress * tileLength;
-int64_t localOffset = 0;
-while (localOffset < curTileLength) {
-    int64_t globalOffset = tileGlobalOffset + localOffset;
-    int64_t channelIdx = (globalOffset / innerSize) % channelSize;
-    int64_t offsetInChannel = globalOffset % innerSize;
-    int64_t segmentLength = min(curTileLength - localOffset, innerSize - offsetInChannel);
-
-    float alpha = static_cast<float>(weightGm.GetValue(channelIdx));
-    ComputePreluSegment(alpha, localOffset, segmentLength);
-    localOffset += segmentLength;
+if constexpr (std::is_same_v<T, bfloat16_t>) {
+    T scalarWeight = *((__gm__ T*)weight);
+    weightValFp32 = AscendC::Cast(scalarWeight);
+} else {
+    T scalarWeight = *((__gm__ T*)weight);
+    weightVal = scalarWeight;
 }
 ```
 
-#### TBE 通用 broadcast offset（扩展）
+channel weight `[C]` 路径在每个 L 段计算前读取一次 `weight[c]`：
 
 ```cpp
-int64_t tmp = globalOffset;
-int64_t weightOffset = 0;
-for (int i = rank - 1; i >= 0; --i) {
-    int64_t idx = tmp % selfShape[i];
-    tmp /= selfShape[i];
-    weightOffset += (weightShape[i] == 1 ? 0 : idx) * weightStride[i];
-}
-float alpha = static_cast<float>(weightGm.GetValue(weightOffset));
+int64_t rowIdx = rowOffset + rowProgress;
+int64_t channelIdx = rowIdx % channelSize;
+T scalarWeight = *((__gm__ T*)weight + channelIdx);
+weightVal = scalarWeight;
 ```
 
-### 2.3 实现路径选择
+bfloat16 路径读取后转换为 float：
 
-- [x] AscendC Kernel（纯 vector 实现）
-- [ ] CATLASS 模板库（矩阵乘法类）
-- [ ] ACLNN 封装（CANN 内置算子）
+```cpp
+T scalarWeight = *((__gm__ T*)weight + channelIdx);
+weightValFp32 = AscendC::Cast(scalarWeight);
+```
 
-**选择理由**：PReLU 不涉及矩阵乘法或归约，核心计算是逐元素 `Mul/Compare/Select`。按通道或 broadcast 只影响 `weight` 读取，不改变 vector 算子主体，适合 AscendC Kernel 实现。
+该方案仍然不需要生成 `weightLocal`，也不需要 `Duplicate` 扩展到 UB。对 rank >= 2 的输入，kernel 将其按 contiguous 逻辑展开为 `[N, C, L]`，一次 `CopyIn/Compute/CopyOut` 处理一个完整 L 段，`Muls` 的标量参数就是当前通道的 `weight[c]`。
+
+### 2.4 实现路径选择
+
+- [x] AscendC Kernel
+- [ ] CATLASS 模板库
+- [ ] ACLNN 封装
+
+PReLU 是纯逐元素算子，无矩阵乘、归约或跨元素依赖。channel weight 只改变每个 L 段使用的 scalar，不改变 vector 计算主体。
 
 ---
 
 ## 3. Tiling 策略
 
-AscendC 算子采用两级 Tiling 策略：Block 级做核间切分，UB 级做核内切分。
+### 3.1 Tiling 参数结构体
 
-### 3.1 Tiling 参数结构体定义
+需要在 `prelu_scalar/op_kernel/prelu_tiling_data.h` 现有字段基础上增加 channel weight 所需的 shape/模式字段。推荐结构如下：
 
 ```cpp
 struct PreluTilingData {
-    int64_t totalLength;        // self.numel()
-    int64_t usedCoreNum;        // 实际使用 AI Core 数
+    int64_t totalLength = 0;    // x 总元素数
+    int64_t usedCoreNum = 0;    // 实际使用 AIV 核数
 
-    int64_t formerNum;          // 整核数量
-    int64_t formerLength;       // 整核数据长度
-    int64_t tailNum;            // 尾核数量，固定为 1
-    int64_t tailLength;         // 尾核数据长度
+    int64_t formerNum = 0;      // scalar 路径：使用 formerLength 的核数；channel 路径：使用 formerRowNum 的核数
+    int64_t formerLength = 0;   // scalar 路径每核元素数；channel 路径可保留为 formerRowNum * innerSize
+    int64_t tailNum = 0;
+    int64_t tailLength = 0;     // scalar 路径尾核元素数；channel 路径可保留为 tailRowNum * innerSize
+    int64_t tileLength = 0;     // UB 最大可处理元素数；channel 路径要求 innerSize <= tileLength
 
-    int64_t tileLength;         // UB 单次处理长度
-
-    int64_t weightNum;          // weight.numel()
-    int64_t channelSize;        // self.dim() >= 2 ? self.size(1) : 1
-    int64_t innerSize;          // self.dim() >= 2 ? prod(self.sizes()[2:]) : totalLength
-    int64_t weightMode;         // 0=scalar, 1=channel, 2=通用broadcast扩展
-
-    int64_t rank;               // 通用broadcast扩展使用，首版可置0
-    int64_t selfShape[8];       // 最多记录8维；超过8维Host侧报错或走contiguous展开策略
-    int64_t weightShape[8];
-    int64_t weightStride[8];
+    int64_t weightSize = 1;     // 1 或 C
+    int64_t weightMode = 0;     // 0=scalar, 1=channel
+    int64_t channelSize = 1;    // C
+    int64_t innerSize = 1;      // L
+    int64_t rowNum = 0;         // N * C
+    int64_t formerRowNum = 0;   // channel 路径整核处理的 L 段数量
+    int64_t tailRowNum = 0;     // channel 路径尾核处理的 L 段数量
 };
 ```
 
-### 3.2 Block 级 Tiling（核间切分）
+scalar 路径可继续使用原有 flat element tiling；channel 路径必须按 row 切分，row 的定义是一个连续 `(n, c, :)` L 段。
 
-**策略要点**：
+### 3.2 Host 侧校验
 
-1. 将 `self` 按 contiguous flat 顺序切分到多个 AI Core。
-2. 每个整核的数据量按 512 字节 cache line 对齐。
-3. 尾核处理剩余数据，满足 `formerNum * formerLength + tailNum * tailLength == totalLength`。
+Host tiling 按以下顺序执行：
 
-| 参数 | 计算公式 | 说明 |
-|------|----------|------|
-| dtypeSize | `self.element_size()` | float16/bfloat16=2，float32=4 |
-| cacheLineElements | `512 / dtypeSize` | 按元素数做 cache line 对齐 |
-| totalLengthCore | `(totalLength + coreNum - 1) / coreNum` | 每核理论元素数 |
-| totalLengthCoreAlign | `ceil(totalLengthCore / cacheLineElements) * cacheLineElements` | 整核元素数 |
-| usedCoreNum | `ceil(totalLength / totalLengthCoreAlign)` | 实际核数 |
-| formerNum | `usedCoreNum - 1` | 整核数量 |
-| tailNum | `1` | 尾核数量 |
-| formerLength | `totalLengthCoreAlign` | 整核长度 |
-| tailLength | `totalLength - formerNum * formerLength` | 尾核长度 |
+1. 获取平台 `ubSize` 与 AIV `coreNum`。
+2. 设置 workspace size 为 0。
+3. 校验 `weight` shape 必须为 `[1]` 或 `[C]`。
+4. 校验 `x/y` shape 相同。
+5. 校验 dtype 为 `DT_FLOAT`、`DT_FLOAT16` 或 `DT_BF16`，且 `x/weight/y` dtype 一致。
+6. 计算 `totalLength = inputX->GetOriginShape().GetShapeSize()`。
+7. `weightSize == 1` 时设置 `weightMode=0`，沿用 scalar flat tiling。
+8. `weightSize != 1` 时要求 `x` rank >= 2，固定 `N=xShape.GetDim(0)`、`C=xShape.GetDim(1)`、`L=prod(xShape.GetDim(i), i>=2)`；rank 为 2 时 `L=1`。
+9. channel 路径要求 `weightSize == C`；设置 `weightMode=1`、`channelSize=C`、`innerSize=L`、`rowNum=N*C`。
+10. 计算 block 级与 UB 级 tiling。
+11. `context->SetBlockDim(usedCoreNum)`，tiling key 固定为 `PRELU_TPL_SCH_MODE_0`。
 
-**负载均衡验证**：
+### 3.3 Block 级 Tiling
 
-- `tailLength > 0`
-- `formerLength >= tailLength` 或仅使用一个尾核
-- `formerNum * formerLength + tailNum * tailLength == totalLength`
+#### scalar weight `[1]`
 
-### 3.3 UB 级 Tiling（核内切分）
-
-**策略要点**：
-
-1. 使用 double buffer 隐藏 GM 读写延迟。
-2. float16/bfloat16 输入必须 Cast 到 float32 后计算，再 Cast 回原 dtype。
-3. 通道 weight 路径按 channel segment 拆分当前 tile，避免生成完整 weight tile。
-4. `tileLength` 按 32 字节对齐。
-
-#### UB 分配表
-
-**float32 输入（Select 推荐路径）：**
-
-| Buffer 名称 | 大小（字节） | 用途 | 数量 | 总大小 |
-|-------------|--------------|------|------|--------|
-| inQueueX | `tileLength * 4` | self 输入缓冲 | `BUFFER_NUM=2` | `tileLength * 8` |
-| outQueueY | `tileLength * 4` | output 输出缓冲 | `BUFFER_NUM=2` | `tileLength * 8` |
-| prodLocal | `tileLength * 4` | `x * weight` 临时缓冲 | 1 | `tileLength * 4` |
-| alphaLocal | `tileLength * 4` | weight 广播向量 | 1 | `tileLength * 4` |
-| zeroLocal | `tileLength * 4` | 0 常量向量 | 1 | `tileLength * 4` |
-| **总计** | - | - | - | **`tileLength * 28`** |
-
-如果使用 `Max/Min` 兼容路径，`alphaLocal` 可省略但需要 `posLocal/negLocal` 两个临时缓冲，总系数仍为 `28`。
-
-**float16/bfloat16 输入（Select 推荐路径）：**
-
-| Buffer 名称 | 大小（字节） | 用途 | 数量 | 总大小 |
-|-------------|--------------|------|------|--------|
-| inQueueX | `tileLength * 2` | self 输入缓冲 | `BUFFER_NUM=2` | `tileLength * 4` |
-| outQueueY | `tileLength * 2` | output 输出缓冲 | `BUFFER_NUM=2` | `tileLength * 4` |
-| xLocalFp32 | `tileLength * 4` | self 升精度缓冲，可复用为 output fp32 | 1 | `tileLength * 4` |
-| prodLocal | `tileLength * 4` | `x * weight` 临时缓冲 | 1 | `tileLength * 4` |
-| alphaLocal | `tileLength * 4` | weight 广播向量 | 1 | `tileLength * 4` |
-| zeroLocal | `tileLength * 4` | 0 常量向量 | 1 | `tileLength * 4` |
-| **总计** | - | - | - | **`tileLength * 24`** |
-
-#### tileLength 计算
-
-| 数据类型 | bufferCoefficient | maxTileElements（UB_SIZE_LIMIT=192KB 示例） | alignElements | tileLength 示例 |
-|----------|-------------------|---------------------------------------------|---------------|----------------|
-| float32 | 28 | `196608 / 28 = 7021` | `32 / 4 = 8` | `7016` |
-| float16 | 24 | `196608 / 24 = 8192` | `32 / 2 = 16` | `8192` |
-| bfloat16 | 24 | `196608 / 24 = 8192` | `32 / 2 = 16` | `8192` |
+常量与当前实现一致：
 
 ```cpp
-int64_t bufferCoefficient = (dtypeSize == 2) ? 24 : 28;
-int64_t maxTileElements = ubSizeLimit / bufferCoefficient;
-int64_t alignElements = 32 / dtypeSize;
-int64_t tileLength = (maxTileElements / alignElements) * alignElements;
+constexpr uint32_t BLOCK_SIZE = 32U;
+constexpr uint32_t CORE_ALIGN_SIZE = 512U;
 ```
 
-#### UB 约束验证
+计算公式：
 
-- **float32**：`7016 * 28 = 196448` bytes，小于 192KB 示例限制。
-- **float16/bfloat16**：`8192 * 24 = 196608` bytes，等于 192KB 示例限制。
-- **对齐要求**：float32 tileLength 是 8 的倍数，float16/bfloat16 tileLength 是 16 的倍数，满足 32 字节对齐。
+```cpp
+uint64_t blockElementNum = BLOCK_SIZE / typeLength;
+uint64_t coreAlignElementNum = CORE_ALIGN_SIZE / typeLength;
+uint64_t coreLimit = static_cast<uint64_t>(coreNum);
+uint64_t totalCoreElements = CeilDiv(totalNum, coreLimit);
+uint64_t blockFactor = CeilDiv(totalCoreElements, coreAlignElementNum) * coreAlignElementNum;
+if (blockFactor == 0) {
+    blockFactor = coreAlignElementNum;
+}
+
+uint64_t finalCoreNum = totalNum == 0 ? 1U : CeilDiv(totalNum, blockFactor);
+finalCoreNum = std::min(coreLimit, finalCoreNum);
+
+formerNum = finalCoreNum > 0 ? finalCoreNum - 1U : 0U;
+tailNum = totalNum > 0 ? 1U : 0U;
+formerLength = blockFactor;
+tailLength = totalNum - formerNum * blockFactor;
+```
+
+Kernel 中每个 core 的偏移与长度：
+
+```cpp
+int64_t blockIdx = GetBlockIdx();
+int64_t blockOffset = blockIdx * tilingData->formerLength;
+if (blockIdx < tilingData->formerNum) {
+    blockLength = tilingData->formerLength;
+} else if (blockIdx < tilingData->usedCoreNum) {
+    blockLength = tilingData->tailLength;
+} else {
+    blockLength = 0;
+}
+```
+
+#### channel weight `[C]`
+
+channel 路径按 row 切分，避免一个 L 段被拆到不同 core 或不同 UB 循环。输入按 contiguous 内存逻辑视为 `[N, C, L]`，其中 `L = prod(x.shape[2:])`；每个 row 对应 `[n, c, 0:L]`，GM 起始偏移为 `rowIdx * innerSize`。
+
+```cpp
+uint64_t rowNum = static_cast<uint64_t>(N * C);
+uint64_t coreLimit = static_cast<uint64_t>(coreNum);
+uint64_t rowsPerCore = CeilDiv(rowNum, coreLimit);
+uint64_t finalCoreNum = rowNum == 0 ? 1U : CeilDiv(rowNum, rowsPerCore);
+finalCoreNum = std::min(coreLimit, finalCoreNum);
+
+usedCoreNum = finalCoreNum;
+formerRowNum = finalCoreNum > 0 ? rowsPerCore : 0U;
+formerNum = finalCoreNum > 0 ? finalCoreNum - 1U : 0U;
+tailNum = rowNum > 0 ? 1U : 0U;
+tailRowNum = rowNum - formerNum * formerRowNum;
+
+formerLength = formerRowNum * innerSize;
+tailLength = tailRowNum * innerSize;
+```
+
+Kernel 中每个 core 的 row 偏移与 row 数：
+
+```cpp
+int64_t blockIdx = GetBlockIdx();
+int64_t rowOffset = blockIdx * tilingData->formerRowNum;
+if (blockIdx < tilingData->formerNum) {
+    blockRowNum = tilingData->formerRowNum;
+} else if (blockIdx < tilingData->usedCoreNum) {
+    blockRowNum = tilingData->tailRowNum;
+    rowOffset = tilingData->formerNum * tilingData->formerRowNum;
+} else {
+    blockRowNum = 0;
+}
+```
+
+### 3.4 UB 级 Tiling
+
+当前实现保留 1024B UB：
+
+```cpp
+constexpr uint64_t UB_RESERVED_SIZE = 1024U;
+uint64_t usableUbSize = (ubSize > UB_RESERVED_SIZE) ? (ubSize - UB_RESERVED_SIZE) : ubSize;
+```
+
+每元素 UB 系数来自 `GetBufferBytesPerElement`：
+
+| dtype | 系数 | 依据 |
+|-------|------|------|
+| float32 | 24 | inputQueueX double buffer 8B + outputQueueY double buffer 8B + pos 4B + neg 4B |
+| float16 | 12 | inputQueueX double buffer 4B + outputQueueY double buffer 4B + pos 2B + neg 2B |
+| bfloat16 | 20 | inputQueueX double buffer 4B + outputQueueY double buffer 4B + xFp32 4B + pos 4B + neg 4B |
+
+计算公式：
+
+```cpp
+uint64_t bufferBytesPerElement = GetBufferBytesPerElement(dataType);
+uint64_t maxTileElements = usableUbSize / bufferBytesPerElement;
+uint64_t blockElementNum = BLOCK_SIZE / typeLength;
+uint64_t ubFactor = (maxTileElements / blockElementNum) * blockElementNum;
+tiling->tileLength = static_cast<int64_t>(ubFactor);
+```
+
+`tileLength` 按 32B 对齐：float32 是 8 的倍数，float16/bfloat16 是 16 的倍数。
+
+channel weight 路径要求：
+
+```cpp
+OP_CHECK_IF(innerSize > static_cast<int64_t>(ubFactor),
+    OP_LOGE(context, "Prelu: L must be less than or equal to tileLength for channel weight"),
+    return ge::GRAPH_FAILED);
+```
+
+保持当前普通 `DataCopy` 方案时，还建议要求 `innerSize` 按 32B 对齐：
+
+```cpp
+uint64_t blockElementNum = BLOCK_SIZE / typeLength;
+OP_CHECK_IF(innerSize % blockElementNum != 0,
+    OP_LOGE(context, "Prelu: L must be 32-byte aligned when using DataCopy"),
+    return ge::GRAPH_FAILED);
+```
+
+如果后续需要支持任意 L，可将 channel 路径的 `CopyIn/CopyOut` 改为 `DataCopyPad`，但本设计先保持 `prelu_scalar` 的普通 `DataCopy` 风格。
+
+### 3.5 UB 分配表
+
+**float32：**
+
+| Buffer | 数量 | 单元素字节 | 总系数 |
+|--------|------|------------|--------|
+| inputQueueX | 2 | 4 | 8 |
+| outputQueueY | 2 | 4 | 8 |
+| tmpBufPos | 1 | 4 | 4 |
+| tmpBufNeg | 1 | 4 | 4 |
+| **合计** | - | - | **24** |
+
+**float16：**
+
+| Buffer | 数量 | 单元素字节 | 总系数 |
+|--------|------|------------|--------|
+| inputQueueX | 2 | 2 | 4 |
+| outputQueueY | 2 | 2 | 4 |
+| tmpBufPos | 1 | 2 | 2 |
+| tmpBufNeg | 1 | 2 | 2 |
+| **合计** | - | - | **12** |
+
+**bfloat16：**
+
+| Buffer | 数量 | 单元素字节 | 总系数 |
+|--------|------|------------|--------|
+| inputQueueX | 2 | 2 | 4 |
+| outputQueueY | 2 | 2 | 4 |
+| tmpXFp32 | 1 | 4 | 4 |
+| tmpBufPos | 1 | 4 | 4 |
+| tmpBufNeg | 1 | 4 | 4 |
+| **合计** | - | - | **20** |
 
 ---
 
 ## 4. Workspace 需求
 
-### 4.1 Workspace 大小计算
-
-| 算子类别 | workspace size | 说明 |
-|----------|----------------|------|
-| elementwise 类 | `SYSTEM_WORKSPACE_SIZE` | 通常为 16MB，用于框架侧 kernel launch 辅助空间 |
-
-- **tiling data size**：`sizeof(PreluTilingData)`
-- **额外 workspace**：不需要额外中间结果 workspace。
-
-### 4.2 Workspace 分配示例
+当前 `prelu_scalar` tiling 设置：
 
 ```cpp
-constexpr int64_t SYSTEM_WORKSPACE_SIZE = 16 * 1024 * 1024;
-size_t workspaceSize = SYSTEM_WORKSPACE_SIZE;
-auto workspace = at::empty({static_cast<int64_t>(workspaceSize)},
-                           at::TensorOptions().dtype(at::kByte).device(self.device()));
+constexpr uint32_t WS_SYS_SIZE = 0U;
+currentWorkspace[0] = WS_SYS_SIZE;
+```
+
+因此本算子不申请额外 workspace。
+
+---
+
+## 5. Kernel 执行流程
+
+### 5.1 Init
+
+1. 根据 `weightMode` 选择 scalar flat 路径或 channel row 路径。
+2. scalar 路径根据 `formerNum/formerLength/tailLength` 计算当前 core 的 `blockLength`。
+3. channel 路径根据 `formerRowNum/tailRowNum` 计算当前 core 的 `rowOffset/blockRowNum`。
+4. 设置 `ubLength = tilingData->tileLength`。
+5. 绑定 `inputGMX`、`outputGMY` 和 `inputGMW`。
+6. scalar 路径从 GM 读取一次 `weight[0]`；channel 路径保存 `weight` GM 指针，逐 L 段读取 `weight[c]`。
+7. 初始化 input/output queue 和临时 buffer。
+
+### 5.2 Process
+
+#### scalar weight `[1]`
+
+```cpp
+int64_t tileNum = (blockLength + ubLength - 1) / ubLength;
+for (int64_t i = 0; i < tileNum; ++i) {
+    uint32_t currentNum = static_cast<uint32_t>(
+        (i == tileNum - 1) ? (blockLength - i * ubLength) : ubLength);
+    CopyIn(i, currentNum);
+    Compute(currentNum);
+    CopyOut(i, currentNum);
+}
+```
+
+#### channel weight `[C]`
+
+channel 路径一次处理一个完整 L 段，`currentNum` 固定为 `innerSize`：
+
+```cpp
+for (int64_t rowProgress = 0; rowProgress < blockRowNum; ++rowProgress) {
+    int64_t rowIdx = rowOffset + rowProgress;
+    int64_t channelIdx = rowIdx % channelSize;
+    int64_t gmOffset = rowIdx * innerSize;
+    uint32_t currentNum = static_cast<uint32_t>(innerSize);
+
+    LoadChannelWeight(channelIdx);
+    CopyInByOffset(gmOffset, currentNum);
+    Compute(currentNum);       // Maxs + Mins + Muls + Add
+    CopyOutByOffset(gmOffset, currentNum);
+}
+```
+
+`LoadChannelWeight` 只读取当前 row 对应的 `weight[c]`，然后 `Compute(currentNum)` 复用 scalar 路径中的 `Muls(neg, neg, weightVal, currentNum)`。
+
+### 5.3 CopyIn/CopyOut
+
+当前实现使用普通 `DataCopy`：
+
+```cpp
+DataCopy(xLocal, inputGMX[progress * ubLength], currentNum);
+DataCopy(outputGMY[progress * ubLength], yLocal, currentNum);
+```
+
+设计文档与当前实现保持一致，不引入 `DataCopyPad`。
+
+channel 路径需要支持按 GM offset 读写完整 L 段：
+
+```cpp
+DataCopy(xLocal, inputGMX[gmOffset], innerSize);
+DataCopy(outputGMY[gmOffset], yLocal, innerSize);
 ```
 
 ---
 
-## 5. 性能优化
+## 6. 性能与约束
 
-### 5.1 关键优化点
+### 6.1 性能特征
 
-1. **Select 快路径**：参考 TBE 新平台实现，使用 `Mul + Compare + Select`，减少 `Max/Min/Add` 组合中的中间计算。
-2. **Double buffer**：输入和输出 queue 使用 `BUFFER_NUM=2`，隐藏 GM 读写延迟。
-3. **标量 weight 快路径**：`weight.numel()==1` 时全 tile 只读取一次 `alpha`。
-4. **通道片段复用**：通道 weight 路径按 `(n,c,*)` 连续片段处理，一个 segment 只读取一次 `weight[c]`。
-5. **避免 weight 展开**：默认不在 UB 中生成完整 weight tile；仅为了 `Mul` API 使用当前 segment 的 `alphaLocal`。
-6. **升精度计算**：float16/bfloat16 使用 float32 计算，减少负半轴乘法误差。
+- 算子为逐元素 memory-bound。
+- scalar 路径每个 core 在 Init 阶段读取一次 `weight[0]`，计算阶段使用 `Muls`。
+- channel 路径每个 L 段读取一次 `weight[c]`，一个 L 段只执行一次 `Maxs + Mins + Muls + Add`。
+- input/output 使用 double buffer queue。
+- bfloat16 路径升精度到 float32 计算；float16 路径按当前实现直接用 float16 计算。
 
-### 5.2 算子特性
+### 6.2 当前限制
 
-- **计算模式**：memory-bound 为主，通道 weight 且 `innerSize` 很小时会增加 scalar weight 读取与循环开销。
-- **访存模式**：self/output 顺序访问；weight 标量、按通道小规模随机读取，或 TBE broadcast 扩展下按 stride 访问。
-- **并行性**：高，每个元素独立；通道广播不引入跨核依赖。
-
----
-
-## 6. Kernel 端实现要点
-
-### 6.1 Init 偏移计算
-
-```cpp
-int64_t blockIdx = AscendC::GetBlockIdx();
-if (blockIdx < formerNum) {
-    blockLength = formerLength;
-    blockOffset = blockIdx * formerLength;
-} else {
-    blockLength = tailLength;
-    blockOffset = formerNum * formerLength;
-}
-
-xGm.SetGlobalBuffer((__gm__ T *)self + blockOffset, blockLength);
-yGm.SetGlobalBuffer((__gm__ T *)output + blockOffset, blockLength);
-weightGm.SetGlobalBuffer((__gm__ T *)weight, weightNum);
-```
-
-### 6.2 执行流程（核内循环）
-
-```cpp
-__aicore__ inline void Process() {
-    int64_t tileNum = (blockLength + tileLength - 1) / tileLength;
-    int64_t tailTileLength = blockLength - (tileNum - 1) * tileLength;
-
-    for (int64_t i = 0; i < tileNum - 1; ++i) {
-        CopyIn(i, tileLength);
-        Compute(i, tileLength);
-        CopyOut(i, tileLength);
-    }
-
-    if (tileNum > 0) {
-        CopyIn(tileNum - 1, tailTileLength);
-        Compute(tileNum - 1, tailTileLength);
-        CopyOut(tileNum - 1, tailTileLength);
-    }
-}
-```
-
-### 6.3 FP16/BF16 升精度流程
-
-```cpp
-LocalTensor<T> xLocal = inQueueX.DeQue<T>();
-LocalTensor<T> yLocal = outQueueY.AllocTensor<T>();
-LocalTensor<float> xFp32 = xFp32Buf.Get<float>();
-
-Cast(xFp32, xLocal, RoundMode::CAST_NONE, len);
-ComputePreluFp32(xFp32, yFp32OrXReuse, alphaFp32, len);
-Cast(yLocal, xFp32, RoundMode::CAST_RINT, len);
-```
-
-### 6.4 边界条件
-
-- `self.numel() == 0`：Host 端直接返回 `empty_like(self)`，不启动 kernel。
-- PyTorch 语义模式下 `weight.numel() != 1 && weight.numel() != self.size(1)`：Host 端报错。
-- `weight.numel() == self.size(1)` 且 `self.dim() < 2`：Host 端报错。
-- TBE broadcast 扩展模式下，Host 端按 `broadcast_inputs_shape` 规则计算 `weightShape/weightStride`，无法 broadcast 时报错。
-- 非 contiguous 输入：Host 端建议先 `self.contiguous()` 和 `weight.contiguous()`，输出保持原 shape。
-- tail tile 的 DataCopy 只访问真实长度；如目标平台要求 32 字节对齐搬运，使用支持 padding/mask 的 DataCopy 形式，禁止读写 GM 越界。
+- 支持 scalar weight `[1]`。
+- 支持 channel weight `[C]` 时 rank >= 2 的输入，固定第 0 维为 N、第 1 维为 C，后续维度乘积为 L。
+- channel 路径首版要求一次处理完整 L：`L <= tileLength`。
+- 保持普通 `DataCopy` 时，建议要求 `L * sizeof(T)` 为 32B 对齐；非对齐 L 需要改为 `DataCopyPad`。
+- 不支持按非第 1 维做 channel broadcast。
+- `LoadBf16ScalarAsFloat` 当前未被实际调用。
 
 ---
 
 ## 7. 实现检查清单
 
-### 7.1 文件结构
+### 7.1 Host 侧
 
-- [ ] `csrc/ops/prelu/CMakeLists.txt`
-- [ ] `csrc/ops/prelu/op_host/prelu.cpp`
-- [ ] `csrc/ops/prelu/op_kernel/kernel_prelu.cpp`
-- [ ] `csrc/ops.h` 添加 `prelu` 声明
-- [ ] `csrc/register.cpp` 添加 `prelu` 注册
+- [x] 注册输入 `x/weight` 和输出 `y`，dtype 支持 float16/float32/bfloat16。
+- [x] InferShape 设置 `y.shape = x.shape`。
+- [ ] 校验 `weight` shape 为 `[1]` 或 `[C]`。
+- [x] 校验 `x/weight/y` dtype 一致。
+- [x] 校验 `x/y` shape 一致。
+- [ ] `weight` 为 `[C]` 时校验 `x` rank >= 2，且 `weightSize == x.shape[1]`。
+- [ ] `weight` 为 `[C]` 时计算 `N=x.shape[0]`、`C=x.shape[1]`、`L=prod(x.shape[2:])`，rank 为 2 时 `L=1`。
+- [ ] `weight` 为 `[C]` 时校验 `L <= tileLength`。
+- [ ] 若保持普通 `DataCopy`，校验 `L * sizeof(T)` 32B 对齐。
+- [x] workspace size 为 0。
+- [ ] tiling data 新增并写入 `weightSize/weightMode/channelSize/innerSize/rowNum/formerRowNum/tailRowNum`。
 
-### 7.2 Host 端实现
+### 7.2 Kernel 侧
 
-- [ ] 校验 self/weight dtype 为 bfloat16、float16 或 float32，且 dtype/device 一致。
-- [ ] 校验 weight 语义与 PyTorch `torch.prelu` 对齐。
-- [ ] 计算 `totalLength/channelSize/innerSize/weightMode`。
-- [ ] 如启用 TBE broadcast 扩展，计算规整后的 `weightShape/weightStride` 和 `weightMode=2`。
-- [ ] 获取 `coreNum/ubSizeLimit` 并计算 Block 级 tiling。
-- [ ] 根据 dtype 选择 `bufferCoefficient`：float32=28，float16/bfloat16=24。
-- [ ] 计算 32 字节对齐的 `tileLength`。
-- [ ] 分配 `SYSTEM_WORKSPACE_SIZE` workspace 并调用 kernel。
+- [x] 根据 blockIdx 计算当前 core 的 GM offset 和 blockLength。
+- [x] Init 阶段读取 scalar weight。
+- [ ] channel 路径根据 blockIdx 计算 `rowOffset/blockRowNum`。
+- [ ] channel 路径每次循环读取一个 `weight[c]`。
+- [ ] channel 路径每次 `CopyIn/Compute/CopyOut` 处理一个完整 L 段。
+- [x] input/output queue 使用 `BUFFER_NUM=2`。
+- [x] float16/float32 使用 `Maxs + Mins + Muls + Add`。
+- [x] bfloat16 使用 `Cast -> Maxs/Mins/Muls/Add -> Cast`。
+- [x] 最后一个 tile 使用 `currentNum = blockLength - i * ubLength`。
+- [x] CopyIn/CopyOut 使用普通 `DataCopy`，与当前代码一致。
 
-### 7.3 Kernel 端实现
+### 7.3 测试建议
 
-- [ ] 实现 `Init`，设置 self/output/weight GM buffer 和 `blockOffset`。
-- [ ] 实现 `CopyIn`，按 tile 从 GM 读取 self。
-- [ ] 实现 `ComputeScalarWeight` 快路径。
-- [ ] 实现 `ComputeChannelWeight` 分段路径。
-- [ ] 可选实现 `ComputeBroadcastWeight`，按 TBE broadcast shape 计算 weight offset。
-- [ ] 优先使用 `Mul + Compare + Select`；如目标 AscendC API 不支持对应 Select 模式，则退回 `Max + Min + Muls + Add`。
-- [ ] float16/bfloat16 路径先 Cast 到 float32，计算后 Cast 回原 dtype。
-- [ ] 实现 `CopyOut`，按 tile 写回 output。
-- [ ] 处理最后一个 tile 的对齐 DataCopy 与真实计算长度。
-
-### 7.4 测试验证
-
-- [ ] 标量 weight：`self` 为 1D/2D/4D，覆盖正数、负数、0。
-- [ ] 通道 weight：`self` 为 `[N, C]`、`[N, C, H, W]`，`weight.numel()==C`。
-- [ ] dtype：bfloat16、float16、float32。
-- [ ] 边界：空 tensor、非 contiguous 输入、`weight.numel()` 非法、`self.dim()<2 && weight.numel()!=1`。
-- [ ] TBE 参考场景：标量 weight、NCHW 按 C 广播、`weight` 可 broadcast 到 `self` 的 ND 形态。
-- [ ] 正确性：与 `torch.prelu(self, weight)` 或 TBE 参考公式对比，float32 使用严格误差，float16/bfloat16 使用合理 `rtol/atol`。
-- [ ] 性能：比较标量 weight 与通道 weight，重点观察 `innerSize == 1` 和大 `innerSize` 场景。
+- scalar weight shape `[1]`，覆盖 float16、float32、bfloat16。
+- channel weight shape `[C]`，覆盖 x shape `[N, C]`、`[N, C, L]`、`[N, C, H, W]` 和更高 rank。
+- channel 路径覆盖 `N > 1`、`C > 1`、不同 `L=prod(x.shape[2:])`，并验证每个 channel 使用对应 `weight[c]`。
+- x shape 覆盖 scalar 路径的 1D、2D、4D 和非 32B 对齐尾块。
+- 数值覆盖正数、负数、0。
+- 非法用例：`weight` shape 非 `[1]` 或 `[C]`、`weightSize != x.shape[1]`、channel 路径 rank < 2、`L > tileLength`、dtype 不一致、输出 shape 与输入不一致。
 
 ---
 
-## 8. 参考实现
+## 8. 参考文件
 
-- **TBE 参考**：`/Users/hc/Downloads/prelu_tbe.py`，重点参考 `broadcast_inputs_shape` 和 `prelu_compute`。
-- **PyTorch 参考**：`torch.prelu(input, weight)`。
-- **设计参考**：`templates/design-template.md`、`references/elementwise-tiling.md`、`references/general-tiling-principles.md`。
+- `/Users/hc/ascendc/prelu_scalar/op_host/prelu_def.cpp`
+- `/Users/hc/ascendc/prelu_scalar/op_host/prelu_infershape.cpp`
+- `/Users/hc/ascendc/prelu_scalar/op_host/prelu_tiling.cpp`
+- `/Users/hc/ascendc/prelu_scalar/op_kernel/prelu.h`
+- `/Users/hc/ascendc/prelu_scalar/op_kernel/prelu_tiling_data.h`
