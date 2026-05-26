@@ -53,7 +53,6 @@ private:
     TQue<QuePosition::VECOUT, BUFFER_NUM> outputQueueY;
     TBuf<TPosition::VECCALC> tmpXFp32;
     TBuf<TPosition::VECCALC> tmpBufProd;
-    TBuf<TPosition::VECCALC> tmpBufZero;
     TBuf<TPosition::VECCALC> tmpBufMask;
 
     GlobalTensor<T> inputGMX;
@@ -112,10 +111,8 @@ __aicore__ inline void Prelu<T>::Init(
     if constexpr (std::is_same_v<T, bfloat16_t>) {
         pipe_->InitBuffer(tmpXFp32, ubLength * sizeof(float));
         pipe_->InitBuffer(tmpBufProd, ubLength * sizeof(float));
-        pipe_->InitBuffer(tmpBufZero, ubLength * sizeof(float));
     } else {
         pipe_->InitBuffer(tmpBufProd, ubLength * sizeof(T));
-        pipe_->InitBuffer(tmpBufZero, ubLength * sizeof(T));
     }
     pipe_->InitBuffer(tmpBufMask, ubLength * sizeof(uint8_t));
 }
@@ -146,22 +143,18 @@ __aicore__ inline void Prelu<T>::Compute(uint32_t currentNum)
         uint32_t compareLength = AlignCompareLength<float>(currentNum);
         LocalTensor<float> xFp32 = tmpXFp32.Get<float>();
         LocalTensor<float> prod = tmpBufProd.Get<float>();
-        LocalTensor<float> zero = tmpBufZero.Get<float>();
         LocalTensor<uint8_t> mask = tmpBufMask.Get<uint8_t>();
         Cast(xFp32, xLocal, RoundMode::CAST_NONE, currentNum);
         Muls(prod, xFp32, weightValFp32, compareLength);
-        Duplicate(zero, 0.0f, compareLength);
-        Compare(mask, xFp32, zero, CMPMODE::GT, compareLength);
+        Compares(mask, xFp32, 0.0f, CMPMODE::GT, compareLength);
         Select(xFp32, mask, xFp32, prod, SELMODE::VSEL_TENSOR_TENSOR_MODE, compareLength);
         Cast(yLocal, xFp32, RoundMode::CAST_RINT, currentNum);
     } else {
         uint32_t compareLength = AlignCompareLength<T>(currentNum);
         LocalTensor<T> prod = tmpBufProd.Get<T>();
-        LocalTensor<T> zero = tmpBufZero.Get<T>();
         LocalTensor<uint8_t> mask = tmpBufMask.Get<uint8_t>();
         Muls(prod, xLocal, weightVal, compareLength);
-        Duplicate(zero, static_cast<T>(0), compareLength);
-        Compare(mask, xLocal, zero, CMPMODE::GT, compareLength);
+        Compares(mask, xLocal, static_cast<T>(0), CMPMODE::GT, compareLength);
         Select(yLocal, mask, xLocal, prod, SELMODE::VSEL_TENSOR_TENSOR_MODE, compareLength);
     }
 

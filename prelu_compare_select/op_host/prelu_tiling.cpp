@@ -99,12 +99,12 @@ static ge::graphStatus GetShapeAndDtypeInfo(
 static uint64_t GetBufferBytesPerElement(ge::DataType dataType)
 {
     if (dataType == ge::DT_FLOAT) {
-        return 25U;
+        return 21U;
     }
     if (dataType == ge::DT_FLOAT16) {
-        return 13U;
+        return 11U;
     }
-    return 21U;
+    return 17U;
 }
 
 static uint64_t GetCompareAlignElementNum(ge::DataType dataType, uint32_t typeLength)
