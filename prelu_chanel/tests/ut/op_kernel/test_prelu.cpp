@@ -60,15 +60,11 @@ TEST_F(PreluKernelTest, test_kernel_run)
     tilingData->usedCoreNum = numBlocks;
     tilingData->formerNum = 0;
     tilingData->formerLength = size;
-    tilingData->tailNum = 1;
     tilingData->tailLength = size;
     tilingData->tileLength = size;
-    tilingData->weightSize = 1;
-    tilingData->weightMode = 0;
     tilingData->channelSize = 1;
     tilingData->innerSize = 1;
     tilingData->innerSizeAligned = 1;
-    tilingData->rowNum = 0;
     tilingData->baseRows = 0;
     tilingData->extraRows = 0;
     
@@ -124,15 +120,11 @@ TEST_F(PreluKernelTest, test_channel_weight_run)
     tilingData->usedCoreNum = numBlocks;
     tilingData->formerNum = 0;
     tilingData->formerLength = 0;
-    tilingData->tailNum = 0;
     tilingData->tailLength = 0;
     tilingData->tileLength = 8;
-    tilingData->weightSize = c;
-    tilingData->weightMode = 1;
     tilingData->channelSize = c;
     tilingData->innerSize = l;
     tilingData->innerSizeAligned = 8;
-    tilingData->rowNum = n * c;
     tilingData->baseRows = n * c;
     tilingData->extraRows = 0;
 
@@ -192,15 +184,11 @@ TEST_F(PreluKernelTest, test_channel_weight_split_l_run)
     tilingData->usedCoreNum = numBlocks;
     tilingData->formerNum = 0;
     tilingData->formerLength = 0;
-    tilingData->tailNum = 0;
     tilingData->tailLength = 0;
     tilingData->tileLength = 8;
-    tilingData->weightSize = c;
-    tilingData->weightMode = 1;
     tilingData->channelSize = c;
     tilingData->innerSize = l;
     tilingData->innerSizeAligned = 24;
-    tilingData->rowNum = n * c;
     tilingData->baseRows = n * c;
     tilingData->extraRows = 0;
 
@@ -260,17 +248,12 @@ TEST_F(PreluKernelTest, test_channel_weight_split_l_parallel_run)
     tilingData->usedCoreNum = numBlocks;
     tilingData->formerNum = 0;
     tilingData->formerLength = 0;
-    tilingData->tailNum = 0;
     tilingData->tailLength = 0;
     tilingData->tileLength = 8;
-    tilingData->weightSize = c;
-    tilingData->weightMode = 1;
     tilingData->channelSize = c;
     tilingData->innerSize = l;
     tilingData->innerSizeAligned = 24;
-    tilingData->rowNum = n * c;
     tilingData->tilesPerRow = 3;
-    tilingData->totalTaskNum = 6;
     tilingData->baseTasks = 1;
     tilingData->extraTasks = 2;
 

@@ -159,9 +159,10 @@ static uint64_t CeilDiv(uint64_t value, uint64_t factor)
 
 static ge::graphStatus CalcTiling(
     gert::TilingContext* context, uint64_t ubSize, int64_t coreNum, int64_t totalNum, ge::DataType dataType,
-    uint32_t typeLength, int64_t weightSize, int64_t weightMode, int64_t channelSize, int64_t innerSize,
-    int64_t rowNum, PreluTilingData* tiling, uint32_t& usedCoreNum)
+    uint32_t typeLength, int64_t weightMode, int64_t channelSize, int64_t innerSize, int64_t rowNum,
+    PreluTilingData* tiling, uint32_t& usedCoreNum, bool& useSplitLParallel)
 {
+    useSplitLParallel = false;
     uint64_t bufferBytesPerElement = GetBufferBytesPerElement(dataType);
     uint64_t usableUbSize = (ubSize > UB_RESERVED_SIZE) ? (ubSize - UB_RESERVED_SIZE) : ubSize;
     uint64_t blockElementNum = BLOCK_SIZE / typeLength;
@@ -174,16 +175,12 @@ static ge::graphStatus CalcTiling(
 
     tiling->totalLength = totalNum;
     tiling->tileLength = static_cast<int64_t>(ubFactor);
-    tiling->weightSize = weightSize;
-    tiling->weightMode = weightMode;
     tiling->channelSize = channelSize;
     tiling->innerSize = innerSize;
     tiling->innerSizeAligned = innerSize;
-    tiling->rowNum = rowNum;
     tiling->baseRows = 0;
     tiling->extraRows = 0;
     tiling->tilesPerRow = 0;
-    tiling->totalTaskNum = 0;
     tiling->baseTasks = 0;
     tiling->extraTasks = 0;
 
@@ -200,17 +197,14 @@ static ge::graphStatus CalcTiling(
 
         uint64_t tailLength = 0;
         uint64_t formerNum = 0;
-        uint64_t tailNum = 0;
         if (totalNum > 0) {
             formerNum = finalCoreNum > 0 ? finalCoreNum - 1U : 0U;
-            tailNum = 1U;
             tailLength = static_cast<uint64_t>(totalNum) - formerNum * blockFactor;
         }
 
         tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
         tiling->formerNum = static_cast<int64_t>(formerNum);
         tiling->formerLength = static_cast<int64_t>(blockFactor);
-        tiling->tailNum = static_cast<int64_t>(tailNum);
         tiling->tailLength = static_cast<int64_t>(tailLength);
         usedCoreNum = static_cast<uint32_t>(finalCoreNum);
         return ge::GRAPH_SUCCESS;
@@ -229,7 +223,6 @@ static ge::graphStatus CalcTiling(
     uint64_t rowNumU64 = static_cast<uint64_t>(rowNum);
     tiling->formerNum = 0;
     tiling->formerLength = 0;
-    tiling->tailNum = 0;
     tiling->tailLength = 0;
     tiling->innerSizeAligned = static_cast<int64_t>(innerSizeAligned);
 
@@ -249,7 +242,6 @@ static ge::graphStatus CalcTiling(
             OP_LOGE(context, "Prelu: totalTaskNum exceeds int64 range"),
             return ge::GRAPH_FAILED);
         tiling->tilesPerRow = static_cast<int64_t>(tilesPerRow);
-        tiling->totalTaskNum = static_cast<int64_t>(totalTaskNum);
 
         if (rowNumU64 < coreLimit && totalTaskNum > rowNumU64) {
             uint64_t finalCoreNum = std::min(coreLimit, totalTaskNum);
@@ -257,6 +249,7 @@ static ge::graphStatus CalcTiling(
             tiling->baseTasks = static_cast<int64_t>(totalTaskNum / finalCoreNum);
             tiling->extraTasks = static_cast<int64_t>(totalTaskNum % finalCoreNum);
             usedCoreNum = static_cast<uint32_t>(finalCoreNum);
+            useSplitLParallel = true;
             return ge::GRAPH_SUCCESS;
         }
     }
@@ -301,9 +294,10 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
     OP_CHECK_NULL_WITH_CONTEXT(context, tiling);
 
     uint32_t usedCoreNum = 1;
+    bool useSplitLParallel = false;
     OP_CHECK_IF(
-        CalcTiling(context, ubSize, coreNum, totalNum, dataType, typeLength, weightSize, weightMode, channelSize,
-            innerSize, rowNum, tiling, usedCoreNum) != ge::GRAPH_SUCCESS,
+        CalcTiling(context, ubSize, coreNum, totalNum, dataType, typeLength, weightMode, channelSize, innerSize,
+            rowNum, tiling, usedCoreNum, useSplitLParallel) != ge::GRAPH_SUCCESS,
         OP_LOGE(context, "CalcTiling error"),
         return ge::GRAPH_FAILED);
 
@@ -313,7 +307,7 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
     if (weightMode == 1) {
         if (tiling->innerSizeAligned <= tiling->tileLength) {
             tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_FULL_L_MODE);
-        } else if (tiling->rowNum < static_cast<int64_t>(coreNum) && tiling->totalTaskNum > tiling->rowNum) {
+        } else if (useSplitLParallel) {
             tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE);
         } else {
             tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_SPLIT_L_MODE);

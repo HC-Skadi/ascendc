@@ -34,17 +34,17 @@ struct PreluTestParam {
 static PreluTestParam testCases[] = {
     {"prelu_0", {7}, ge::DT_FLOAT, ge::FORMAT_ND, {1}, ge::DT_FLOAT, ge::FORMAT_ND, {7}, ge::DT_FLOAT,
         ge::FORMAT_ND, "Ascend910B", ge::GRAPH_SUCCESS, 0UL,
-        "7 1 0 128 1 7 10880 1 0 1 1 1 0 0 0 0 0 0 0 ",
+        "7 1 0 128 7 10880 1 1 1 0 0 0 0 0 ",
         {0}, 64, 262144, 4096},
     {"prelu_channel", {2, 3, 5}, ge::DT_FLOAT, ge::FORMAT_ND, {3}, ge::DT_FLOAT, ge::FORMAT_ND, {2, 3, 5},
         ge::DT_FLOAT, ge::FORMAT_ND, "Ascend910B", ge::GRAPH_SUCCESS, 1UL,
-        "30 6 0 0 0 0 10880 3 1 3 5 8 6 1 0 0 0 0 0 ", {0}, 64, 262144, 4096},
+        "30 6 0 0 0 10880 3 5 8 1 0 0 0 0 ", {0}, 64, 262144, 4096},
     {"prelu_channel_split", {64, 2, 20000}, ge::DT_FLOAT, ge::FORMAT_ND, {2}, ge::DT_FLOAT, ge::FORMAT_ND,
         {64, 2, 20000}, ge::DT_FLOAT, ge::FORMAT_ND, "Ascend910B", ge::GRAPH_SUCCESS, 2UL,
-        "2560000 64 0 0 0 0 10880 2 1 2 20000 20000 128 2 0 2 256 0 0 ", {0}, 64, 262144, 4096},
+        "2560000 64 0 0 0 10880 2 20000 20000 2 0 2 0 0 ", {0}, 64, 262144, 4096},
     {"prelu_channel_split_parallel", {1, 2, 20000}, ge::DT_FLOAT, ge::FORMAT_ND, {2}, ge::DT_FLOAT,
         ge::FORMAT_ND, {1, 2, 20000}, ge::DT_FLOAT, ge::FORMAT_ND, "Ascend910B", ge::GRAPH_SUCCESS, 3UL,
-        "40000 4 0 0 0 0 10880 2 1 2 20000 20000 2 0 0 2 4 1 0 ", {0}, 64, 262144, 4096},
+        "40000 4 0 0 0 10880 2 20000 20000 0 0 2 1 0 ", {0}, 64, 262144, 4096},
 };
 
 class PreluTilingTest : public testing::TestWithParam<PreluTestParam> {
