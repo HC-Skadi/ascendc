@@ -182,6 +182,10 @@ static ge::graphStatus CalcTiling(
     tiling->rowNum = rowNum;
     tiling->baseRows = 0;
     tiling->extraRows = 0;
+    tiling->tilesPerRow = 0;
+    tiling->totalTaskNum = 0;
+    tiling->baseTasks = 0;
+    tiling->extraTasks = 0;
 
     uint64_t coreLimit = static_cast<uint64_t>(coreNum);
     if (weightMode == 0) {
@@ -223,13 +227,42 @@ static ge::graphStatus CalcTiling(
         OP_LOGE(context, "Prelu: aligned L exceeds int64 range"),
         return ge::GRAPH_FAILED);
     uint64_t rowNumU64 = static_cast<uint64_t>(rowNum);
-    uint64_t finalCoreNum = rowNumU64 == 0 ? 1U : std::min(coreLimit, rowNumU64);
-    tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
     tiling->formerNum = 0;
     tiling->formerLength = 0;
     tiling->tailNum = 0;
     tiling->tailLength = 0;
     tiling->innerSizeAligned = static_cast<int64_t>(innerSizeAligned);
+
+    if (innerSizeAligned > ubFactor) {
+        uint64_t tilesPerRow = CeilDiv(static_cast<uint64_t>(innerSize), ubFactor);
+        OP_CHECK_IF(
+            tilesPerRow > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+            OP_LOGE(context, "Prelu: tilesPerRow exceeds int64 range"),
+            return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            rowNumU64 > std::numeric_limits<uint64_t>::max() / tilesPerRow,
+            OP_LOGE(context, "Prelu: totalTaskNum exceeds uint64 range"),
+            return ge::GRAPH_FAILED);
+        uint64_t totalTaskNum = rowNumU64 * tilesPerRow;
+        OP_CHECK_IF(
+            totalTaskNum > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+            OP_LOGE(context, "Prelu: totalTaskNum exceeds int64 range"),
+            return ge::GRAPH_FAILED);
+        tiling->tilesPerRow = static_cast<int64_t>(tilesPerRow);
+        tiling->totalTaskNum = static_cast<int64_t>(totalTaskNum);
+
+        if (rowNumU64 < coreLimit && totalTaskNum > rowNumU64) {
+            uint64_t finalCoreNum = std::min(coreLimit, totalTaskNum);
+            tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
+            tiling->baseTasks = static_cast<int64_t>(totalTaskNum / finalCoreNum);
+            tiling->extraTasks = static_cast<int64_t>(totalTaskNum % finalCoreNum);
+            usedCoreNum = static_cast<uint32_t>(finalCoreNum);
+            return ge::GRAPH_SUCCESS;
+        }
+    }
+
+    uint64_t finalCoreNum = rowNumU64 == 0 ? 1U : std::min(coreLimit, rowNumU64);
+    tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
     tiling->baseRows = static_cast<int64_t>(rowNumU64 / finalCoreNum);
     tiling->extraRows = static_cast<int64_t>(rowNumU64 % finalCoreNum);
     usedCoreNum = static_cast<uint32_t>(finalCoreNum);
@@ -278,9 +311,13 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
 
     uint64_t tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_SCALAR_MODE);
     if (weightMode == 1) {
-        tilingKey = (tiling->innerSizeAligned <= tiling->tileLength)
-            ? GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_FULL_L_MODE)
-            : GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_SPLIT_L_MODE);
+        if (tiling->innerSizeAligned <= tiling->tileLength) {
+            tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_FULL_L_MODE);
+        } else if (tiling->rowNum < static_cast<int64_t>(coreNum) && tiling->totalTaskNum > tiling->rowNum) {
+            tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE);
+        } else {
+            tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_SPLIT_L_MODE);
+        }
     }
     context->SetTilingKey(tilingKey);
     return ge::GRAPH_SUCCESS;

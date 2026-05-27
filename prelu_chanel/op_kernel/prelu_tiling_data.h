@@ -25,5 +25,9 @@ struct PreluTilingData {
     int64_t rowNum = 0;            // N * C
     int64_t baseRows = 0;          // channel路径每核基础row数
     int64_t extraRows = 0;         // channel路径前extraRows个核各多处理1个row
+    int64_t tilesPerRow = 0;       // split-L parallel路径每个row的L维tile数
+    int64_t totalTaskNum = 0;      // split-L parallel路径任务总数
+    int64_t baseTasks = 0;         // split-L parallel路径每核基础task数
+    int64_t extraTasks = 0;        // split-L parallel路径前extraTasks个核各多处理1个task
 };
 #endif

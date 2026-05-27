@@ -24,6 +24,9 @@ __global__ __aicore__ void prelu(GM_ADDR x, GM_ADDR weight, GM_ADDR y, GM_ADDR w
     } else if constexpr (schMode == PRELU_TPL_CHANNEL_SPLIT_L_MODE) {
         op.InitChannel(x, weight, y, &tilingData, &pipe);
         op.ProcessChannelSplitL();
+    } else if constexpr (schMode == PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE) {
+        op.InitChannelSplitLParallel(x, weight, y, &tilingData, &pipe);
+        op.ProcessChannelSplitLParallel();
     } else {
         op.InitScalar(x, weight, y, &tilingData, &pipe);
         op.ProcessScalar();

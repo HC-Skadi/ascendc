@@ -153,16 +153,22 @@ struct PreluTilingData {
     int64_t rowNum = 0;         // N * C
     int64_t baseRows = 0;       // channel 路径每核基础 row 数
     int64_t extraRows = 0;      // channel 路径前 extraRows 个 core 各多处理 1 个 row
+
+    int64_t tilesPerRow = 0;    // split-L parallel 路径每个 row 的 L 维 tile 数
+    int64_t totalTaskNum = 0;   // split-L parallel 路径任务总数，rowNum * tilesPerRow
+    int64_t baseTasks = 0;      // split-L parallel 路径每核基础 task 数
+    int64_t extraTasks = 0;     // split-L parallel 路径前 extraTasks 个 core 各多处理 1 个 task
 };
 ```
 
-scalar 路径可继续使用原有 flat element tiling；channel 路径必须按 row 切分，row 的定义是一个连续 `(n, c, :)` L 段。
+scalar 路径可继续使用原有 flat element tiling；channel full-L 和普通 split-L 路径按 row 切分，row 的定义是一个连续 `(n, c, :)` L 段。split-L parallel 路径把每个 `(rowIdx, tileIdx)` 作为独立 task 做核间切分，用于 `N*C` 较小但 `L` 很大的场景。
 
 字段使用约束：
 
 - scalar tilingKey：只使用 `formerNum/formerLength/tailNum/tailLength/tileLength` 做 flat element tiling；channel 字段可保持默认值，kernel 不读取这些字段。
 - full-L channel tilingKey：以 `rowOffset/blockRowNum/innerSize/innerSizeAligned` 作为 channel 分支的循环、搬运和计算依据；`formerNum/formerLength/tailNum/tailLength` 可作为兼容字段保留，但不能用于 channel row 分配或循环边界。
 - split-L channel tilingKey：仍以 `rowOffset/blockRowNum/innerSize/tileLength` 作为循环和搬运依据，row 内再按 `tileLength` 分段；每个分段单独计算 `realLen` 和 `computeLen=AlignUp(realLen, 32 / sizeof(T))`。
+- split-L parallel channel tilingKey：以 kernel 本地计算出的 `taskOffset/taskNum` 和 tiling data 中的 `tilesPerRow/innerSize/tileLength` 作为循环和搬运依据；每个 task 对应一个 `(rowIdx, tileIdx)`，通过 `rowIdx = taskIdx / tilesPerRow`、`tileIdx = taskIdx % tilesPerRow` 还原 GM offset。
 - `weightMode` 保留在 tiling data 中，主要用于 Host 侧选择 tilingKey、UT 断言和调试；Kernel 主执行路径必须由 tilingKey 的 `schMode` 编译期分发决定，不能再通过运行时 `if (weightMode)` 选择路径。
 
 ### 3.2 TilingKey 设计
@@ -175,15 +181,18 @@ scalar 路径可继续使用原有 flat element tiling；channel 路径必须按
 #define PRELU_TPL_SCALAR_MODE 0
 #define PRELU_TPL_CHANNEL_FULL_L_MODE 1
 #define PRELU_TPL_CHANNEL_SPLIT_L_MODE 2
+#define PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE 3
 
 ASCENDC_TPL_ARGS_DECL(
     Prelu,
     ASCENDC_TPL_UINT_DECL(schMode, 2, ASCENDC_TPL_UI_LIST,
-        PRELU_TPL_SCALAR_MODE, PRELU_TPL_CHANNEL_FULL_L_MODE, PRELU_TPL_CHANNEL_SPLIT_L_MODE));
+        PRELU_TPL_SCALAR_MODE, PRELU_TPL_CHANNEL_FULL_L_MODE, PRELU_TPL_CHANNEL_SPLIT_L_MODE,
+        PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE));
 
 ASCENDC_TPL_SEL(ASCENDC_TPL_ARGS_SEL(
     ASCENDC_TPL_UINT_SEL(schMode, ASCENDC_TPL_UI_LIST,
-        PRELU_TPL_SCALAR_MODE, PRELU_TPL_CHANNEL_FULL_L_MODE, PRELU_TPL_CHANNEL_SPLIT_L_MODE)));
+        PRELU_TPL_SCALAR_MODE, PRELU_TPL_CHANNEL_FULL_L_MODE, PRELU_TPL_CHANNEL_SPLIT_L_MODE,
+        PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE)));
 ```
 
 tilingKey 语义：
@@ -192,9 +201,10 @@ tilingKey 语义：
 |-----------|----------|-------------|----------|
 | `PRELU_TPL_SCALAR_MODE` | `weight` shape 为 `[1]` | scalar flat 路径 | `formerNum/formerLength/tailNum/tailLength/tileLength` |
 | `PRELU_TPL_CHANNEL_FULL_L_MODE` | `weight` shape 为 `[C]` 且 `AlignUp(L, 32 / sizeof(T)) <= tileLength` | channel full-L row 路径 | `channelSize/innerSize/innerSizeAligned/baseRows/extraRows/tileLength` |
-| `PRELU_TPL_CHANNEL_SPLIT_L_MODE` | `weight` shape 为 `[C]` 且 `AlignUp(L, 32 / sizeof(T)) > tileLength` | channel split-L row 路径 | `channelSize/innerSize/baseRows/extraRows/tileLength` |
+| `PRELU_TPL_CHANNEL_SPLIT_L_MODE` | `weight` shape 为 `[C]` 且 `AlignUp(L, 32 / sizeof(T)) > tileLength`，并且 `rowNum >= coreNum` 或 task 级并行不能增加可用 core 数 | channel split-L row 路径 | `channelSize/innerSize/baseRows/extraRows/tileLength` |
+| `PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE` | `weight` shape 为 `[C]` 且 `AlignUp(L, 32 / sizeof(T)) > tileLength`，并且 `rowNum < coreNum` 且 `rowNum * CeilDiv(L, tileLength) > rowNum` | channel split-L task 路径 | `channelSize/innerSize/tilesPerRow/totalTaskNum/baseTasks/extraTasks/tileLength` |
 
-full-L 路径是小 L 的快速路径；split-L 路径用于 `H*W` 或更高维乘积超过 UB 的场景。后续如果需要 small-L 多 row 合并优化，应继续新增 tilingKey，例如 `PRELU_TPL_CHANNEL_MULTI_ROW_MODE`，不要把多种策略继续塞进同一个 runtime 分支。
+full-L 路径是小 L 的快速路径；普通 split-L 路径用于 `H*W` 或更高维乘积超过 UB 且 `rowNum` 足以覆盖 core 的场景。split-L parallel 路径用于 `N*C` 较小、`L` 很大的场景，避免普通 split-L 最多只使用 `rowNum` 个 core。后续如果需要 small-L 多 row 合并优化，应继续新增 tilingKey，例如 `PRELU_TPL_CHANNEL_MULTI_ROW_MODE`，不要把多种策略继续塞进同一个 runtime 分支。
 
 ### 3.3 Host 侧校验
 
@@ -210,8 +220,10 @@ Host tiling 按以下顺序执行：
 8. `weightSize != 1` 时要求 `x` rank >= 2，固定 `N=xShape.GetDim(0)`、`C=xShape.GetDim(1)`、`L=prod(xShape.GetDim(i), i>=2)`；rank 为 2 时 `L=1`。
 9. channel 路径要求 `weightSize == C`。
 10. 计算 `innerSize=L`、`rowNum=N*C`、`innerSizeAligned=AlignUp(L, 32 / sizeof(T))` 时必须做正数和 `int64_t` 溢出保护，检查通过后再设置 `weightMode=1`、`channelSize=C`、`innerSize`、`innerSizeAligned`、`rowNum`。
-11. 计算 block 级与 UB 级 tiling，得到 `ubFactor` 并写入 `tiling->tileLength`。channel 路径不再因为 `innerSizeAligned > tileLength` 返回失败，而是选择 split-L tilingKey。
-12. 根据 `weightMode` 和 `innerSizeAligned` 设置 tilingKey，`tileLength` 必须来自当前 tiling 计算得到的 `ubFactor`，不能使用未定义局部变量：
+11. 计算 block 级与 UB 级 tiling，得到 `ubFactor` 并写入 `tiling->tileLength`。channel 路径不再因为 `innerSizeAligned > tileLength` 返回失败，而是继续在 split-L 类 tilingKey 中选择。
+12. 当 `weightMode=1` 且 `innerSizeAligned > tileLength` 时，使用 `uint64_t` 中间变量计算 `tilesPerRow=CeilDiv(innerSize, tileLength)` 与 `totalTaskNum=rowNum*tilesPerRow`，写入 `int64_t` tiling 字段前检查不超过 `int64_t::max()`。若 `rowNum < coreNum && totalTaskNum > rowNum`，选择 split-L parallel；否则选择普通 split-L。该条件允许 `totalTaskNum` 小于 `coreNum` 但仍能从 `rowNum` 个 core 提升到更多 core 的场景进入 parallel 路径。
+13. 普通 channel row 路径的 `usedCoreNum = min(coreNum, rowNum)`；split-L parallel 路径的 `usedCoreNum = min(coreNum, totalTaskNum)`，并写入 `tiling->usedCoreNum`。`context->SetBlockDim(usedCoreNum)` 必须使用当前路径重新计算后的 `usedCoreNum`。
+14. 根据 `weightMode`、`innerSizeAligned`、`rowNum` 和 `totalTaskNum` 设置 tilingKey，`tileLength` 必须来自当前 tiling 计算得到的 `ubFactor`，不能使用未定义局部变量：
 
 ```cpp
 int64_t tileLength = static_cast<int64_t>(ubFactor);
@@ -219,14 +231,18 @@ tiling->tileLength = tileLength;
 
 uint64_t tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_SCALAR_MODE);
 if (weightMode == 1) {
-    tilingKey = (innerSizeAligned <= tileLength)
-        ? GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_FULL_L_MODE)
-        : GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_SPLIT_L_MODE);
+    if (innerSizeAligned <= tileLength) {
+        tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_FULL_L_MODE);
+    } else if (rowNum < coreNum && totalTaskNum > rowNum) {
+        tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE);
+    } else {
+        tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_SPLIT_L_MODE);
+    }
 }
 context->SetTilingKey(tilingKey);
 ```
 
-13. `context->SetBlockDim(usedCoreNum)`。
+15. `context->SetBlockDim(usedCoreNum)`。
 
 `rowNum=N*C` 的溢出检查需要显式完成：
 
@@ -288,7 +304,7 @@ if (blockIdx < tilingData->formerNum) {
 
 #### channel weight `[C]`
 
-channel 路径按 row 切分，避免一个 L 段被拆到不同 core 或不同 UB 循环。输入按 contiguous 内存逻辑视为 `[N, C, L]`，其中 `L = prod(x.shape[2:])`；每个 row 对应 `[n, c, 0:L]`，GM 起始偏移为 `rowIdx * innerSize`。
+channel full-L 和普通 split-L 路径按 row 切分；split-L parallel 路径按 `(rowIdx, tileIdx)` task 切分，允许同一个 row 的不同 L 分段分配到不同 core。输入按 contiguous 内存逻辑视为 `[N, C, L]`，其中 `L = prod(x.shape[2:])`；每个 row 对应 `[n, c, 0:L]`，GM 起始偏移为 `rowIdx * innerSize`。
 
 推荐使用 `baseRows + extraRows` 做均衡分配，而不是只设置一个尾核。这样当 `rowNum` 不能整除 `usedCoreNum` 时，前 `extraRows` 个 core 各多处理 1 个 row，任意两个 core 的 row 数最多相差 1。
 
@@ -315,6 +331,64 @@ if (blockIdx < tilingData->extraRows) {
     rowOffset = 0;
 }
 ```
+
+#### channel split-L parallel task 切分
+
+普通 channel split-L 仍按 row 分 core。当 `rowNum=N*C` 小于 AIV core 数且 `L` 很大时，最多只能使用 `rowNum` 个 core，核间并行度不足。split-L parallel 路径把每个 row 的每个 L 分段视为一个独立 task，以 task 为粒度做核间均衡分配：
+
+```cpp
+uint64_t tilesPerRow = CeilDiv(static_cast<uint64_t>(innerSize), static_cast<uint64_t>(tileLength));
+OP_CHECK_IF(
+    tilesPerRow > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+    OP_LOGE(context, "Prelu: tilesPerRow exceeds int64 range"),
+    return ge::GRAPH_FAILED);
+OP_CHECK_IF(
+    static_cast<uint64_t>(rowNum) > std::numeric_limits<uint64_t>::max() / tilesPerRow,
+    OP_LOGE(context, "Prelu: totalTaskNum exceeds uint64 range"),
+    return ge::GRAPH_FAILED);
+uint64_t totalTaskNum = static_cast<uint64_t>(rowNum) * tilesPerRow;
+OP_CHECK_IF(
+    totalTaskNum > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+    OP_LOGE(context, "Prelu: totalTaskNum exceeds int64 range"),
+    return ge::GRAPH_FAILED);
+uint64_t usedCoreNum = totalTaskNum == 0 ? 1U : std::min(static_cast<uint64_t>(coreNum), totalTaskNum);
+uint64_t baseTasks = totalTaskNum / usedCoreNum;
+uint64_t extraTasks = totalTaskNum % usedCoreNum;
+
+tiling->tilesPerRow = static_cast<int64_t>(tilesPerRow);
+tiling->totalTaskNum = static_cast<int64_t>(totalTaskNum);
+tiling->usedCoreNum = static_cast<int64_t>(usedCoreNum);
+tiling->baseTasks = static_cast<int64_t>(baseTasks);
+tiling->extraTasks = static_cast<int64_t>(extraTasks);
+```
+
+Kernel 中每个 core 的 task 偏移与 task 数：
+
+```cpp
+int64_t blockIdx = GetBlockIdx();
+if (blockIdx < tilingData->extraTasks) {
+    taskNum = tilingData->baseTasks + 1;
+    taskOffset = blockIdx * (tilingData->baseTasks + 1);
+} else if (blockIdx < tilingData->usedCoreNum) {
+    taskNum = tilingData->baseTasks;
+    taskOffset = tilingData->extraTasks * (tilingData->baseTasks + 1) +
+                 (blockIdx - tilingData->extraTasks) * tilingData->baseTasks;
+} else {
+    taskNum = 0;
+    taskOffset = 0;
+}
+```
+
+每个 task 还原为一个 `(rowIdx, tileIdx)`：
+
+```cpp
+int64_t taskIdx = taskOffset + taskProgress;
+int64_t rowIdx = taskIdx / tilingData->tilesPerRow;
+int64_t tileIdx = taskIdx % tilingData->tilesPerRow;
+int64_t tileOffset = tileIdx * tilingData->tileLength;
+```
+
+split-L parallel 会让同一个 row 的不同 L 分段分配到不同 core，因此每个 task 都需要根据 `rowIdx` 重新读取一次 `weight[rowIdx % C]`。相比普通 split-L 每个 row 只读取一次 weight，该策略增加少量标量读取和 task 解码开销，但能显著改善 `rowNum < coreNum`、`L` 很大场景的 AIV 利用率。
 
 ### 3.5 UB 级 Tiling
 
@@ -365,7 +439,7 @@ bool channelFullL = innerSizeAligned <= ubFactor;
 
 当 `channelFullL == true`，Kernel 使用 `PRELU_TPL_CHANNEL_FULL_L_MODE`，一个 row 一次搬运和计算完整 L。
 
-当 `channelFullL == false`，Kernel 使用 `PRELU_TPL_CHANNEL_SPLIT_L_MODE`，每个 row 内按 `tileLength` 对 L 维分段：
+当 `channelFullL == false`，普通 split-L 路径使用 `PRELU_TPL_CHANNEL_SPLIT_L_MODE`，每个 row 内按 `tileLength` 对 L 维分段：
 
 ```cpp
 static uint64_t AlignUp(uint64_t value, uint64_t align)
@@ -382,6 +456,25 @@ for (int64_t tileOffset = 0; tileOffset < innerSize; tileOffset += tileLength) {
     Compute(computeLen);
     CopyOutByOffset(gmOffset, realLen);
 }
+```
+
+当 `channelFullL == false` 且 `rowNum < coreNum && totalTaskNum > rowNum`，Kernel 使用 `PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE`，每个 task 处理一个 row 的一个 L 分段：
+
+```cpp
+int64_t taskIdx = taskOffset + taskProgress;
+int64_t rowIdx = taskIdx / tilesPerRow;
+int64_t tileIdx = taskIdx % tilesPerRow;
+int64_t tileOffset = tileIdx * tileLength;
+int64_t remainLen = innerSize - tileOffset;
+uint32_t realLen = static_cast<uint32_t>(remainLen > tileLength ? tileLength : remainLen);
+uint32_t computeLen = AlignUp(realLen, blockElementNum);
+int64_t channelIdx = rowIdx % channelSize;
+int64_t gmOffset = rowIdx * innerSize + tileOffset;
+
+LoadChannelWeight(channelIdx);
+CopyInByOffset(gmOffset, realLen, computeLen);
+Compute(computeLen);
+CopyOutByOffset(gmOffset, realLen);
 ```
 
 `tileLength` 已按 32B 对齐，因此 split-L 中间分段的 `realLen == computeLen == tileLength`；只有最后一个分段可能非 32B 对齐，需要 `DataCopyPad` 补齐到 `computeLen`。无论 full-L 还是 split-L，`CopyOut(realLen)` 都只写回真实数据，padding 区结果不写回 GM。如需便于调试或减少未初始化 UB 数据参与计算，可选择在 CopyIn 前清零 `xLocal[0:computeLen]` 区间：
@@ -471,6 +564,11 @@ __global__ __aicore__ void prelu(GM_ADDR x, GM_ADDR weight, GM_ADDR y, GM_ADDR w
         NsPrelu::Prelu<DTYPE_X> op;
         op.InitChannel(x, weight, y, &tilingData, &pipe);
         op.ProcessChannelSplitL();
+    } else if constexpr (schMode == PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE) {
+        AscendC::TPipe pipe;
+        NsPrelu::Prelu<DTYPE_X> op;
+        op.InitChannelSplitLParallel(x, weight, y, &tilingData, &pipe);
+        op.ProcessChannelSplitLParallel();
     }
 }
 ```
@@ -483,14 +581,15 @@ if constexpr (schMode == PRELU_TPL_SCALAR_MODE) {
     op.Init(...);
     op.Process();
 } else if constexpr (schMode == PRELU_TPL_CHANNEL_FULL_L_MODE ||
-                     schMode == PRELU_TPL_CHANNEL_SPLIT_L_MODE) {
+                     schMode == PRELU_TPL_CHANNEL_SPLIT_L_MODE ||
+                     schMode == PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE) {
     NsPrelu::PreluChannel<DTYPE_X> op;
     op.Init(...);
     op.Process();
 }
 ```
 
-当前阶段可先保留一个 `Prelu<T>` 类，但必须暴露 `InitScalar()/ProcessScalar()`、`InitChannel()/ProcessChannelFullL()` 和 `ProcessChannelSplitL()`，由 `schMode` 编译期分发调用。这样 Init 和 Process 都不会再依赖运行时 `weightMode` 选择主路径。
+当前阶段可先保留一个 `Prelu<T>` 类，但必须暴露 `InitScalar()/ProcessScalar()`、`InitChannel()/ProcessChannelFullL()`、`InitChannel()/ProcessChannelSplitL()` 和 `InitChannelSplitLParallel()/ProcessChannelSplitLParallel()`，由 `schMode` 编译期分发调用。这样 Init 和 Process 都不会再依赖运行时 `weightMode` 选择主路径。
 
 ### 5.2 Init
 
@@ -508,6 +607,13 @@ if constexpr (schMode == PRELU_TPL_SCALAR_MODE) {
 
 1. 根据 `baseRows/extraRows` 计算当前 core 的 `rowOffset/blockRowNum`。
 2. 设置 `ubLength = tilingData->tileLength`、`innerSize`、`innerSizeAligned`、`channelSize`。
+3. 绑定完整 `inputGMX`、`outputGMY`，并保存 `weight` GM 指针。
+4. 初始化 input/output queue 和临时 buffer。
+
+`InitChannelSplitLParallel`：
+
+1. 根据 `baseTasks/extraTasks` 计算当前 core 的 `taskOffset/taskNum`。
+2. 设置 `ubLength = tilingData->tileLength`、`innerSize`、`tilesPerRow`、`channelSize`。
 3. 绑定完整 `inputGMX`、`outputGMY`，并保存 `weight` GM 指针。
 4. 初始化 input/output queue 和临时 buffer。
 
@@ -577,7 +683,32 @@ for (int64_t rowProgress = 0; rowProgress < blockRowNum; ++rowProgress) {
 }
 ```
 
-中间 tile 因为 `ubLength` 已 32B 对齐，`realLen == computeLen == ubLength`；最后一个 tile 通过 `DataCopyPad` 处理非对齐尾部。每个 row 只需读取一次 `weight[c]`，row 内所有 L 分段复用该 scalar。
+#### channel weight `[C]` split-L parallel
+
+split-L parallel 路径用于 `L` 超过 UB 可处理长度，且 `rowNum=N*C` 小于 core 数、task 级切分能增加可用 core 数的场景。核间按 task 切分，每个 task 对应一个 `(rowIdx, tileIdx)`：
+
+```cpp
+for (int64_t taskProgress = 0; taskProgress < taskNum; ++taskProgress) {
+    int64_t taskIdx = taskOffset + taskProgress;
+    int64_t rowIdx = taskIdx / tilesPerRow;
+    int64_t tileIdx = taskIdx % tilesPerRow;
+    int64_t tileOffset = tileIdx * ubLength;
+    int64_t remainLen = innerSize - tileOffset;
+    uint32_t realLen = static_cast<uint32_t>(remainLen > ubLength ? ubLength : remainLen);
+    uint32_t computeLen = AlignUp(realLen, 32 / sizeof(T));
+    int64_t channelIdx = rowIdx % channelSize;
+    int64_t gmOffset = rowIdx * innerSize + tileOffset;
+
+    LoadChannelWeight(channelIdx);
+    CopyInByOffset(gmOffset, realLen, computeLen);
+    Compute(computeLen);
+    CopyOutByOffset(gmOffset, realLen);
+}
+```
+
+该路径允许不同 core 处理同一个 row 的不同 `L` 分段。由于各 task 写回的 GM 区间互不重叠，不需要同步或 workspace。每个 task 都会读取一次当前 `channelIdx` 对应的 weight；这是为了换取更高的核间并行度，适合 `N*C` 很小、`L` 很大的场景。
+
+中间 tile 因为 `ubLength` 已 32B 对齐，`realLen == computeLen == ubLength`；最后一个 tile 通过 `DataCopyPad` 处理非对齐尾部。普通 split-L 路径每个 row 只需读取一次 `weight[c]`，row 内所有 L 分段复用该 scalar；split-L parallel 路径按 task 并行，同一 row 的不同 L 分段可能落到不同 core，因此每个 task 单独读取当前 `weight[c]`。
 
 ### 5.4 CopyIn/CopyOut
 
@@ -598,7 +729,7 @@ CopyLocalToGmPad(outputGMY[gmOffset], yLocal, realLen);
 实现约束：
 
 - `inputQueueX/outputQueueY/tmpBuf*` 仍按 `tileLength` 初始化，不能按 `realLen` 初始化。
-- channel full-L 路径必须保证 `computeLen = innerSizeAligned <= tileLength`；channel split-L 路径必须保证每个分段的 `computeLen <= tileLength`。
+- channel full-L 路径必须保证 `computeLen = innerSizeAligned <= tileLength`；普通 split-L 和 split-L parallel 路径都必须保证每个分段的 `computeLen <= tileLength`。
 - padding 区结果不写回 GM，因此不要求 padding value 必须为 0；可选清零 `xLocal[0:computeLen]` 以便调试和降低未初始化 UB 数据参与计算的风险。
 
 ---
@@ -611,6 +742,7 @@ CopyLocalToGmPad(outputGMY[gmOffset], yLocal, realLen);
 - scalar 路径每个 core 在 Init 阶段读取一次 `weight[0]`，计算阶段使用 `Muls`。
 - channel full-L 路径每个 row 读取一次 `weight[c]`，一个完整 L 段执行一次 `Maxs + Mins + Muls + Add`。
 - channel split-L 路径每个 row 读取一次 `weight[c]`，row 内每个 L tile 执行一次 `Maxs + Mins + Muls + Add`。
+- channel split-L parallel 路径每个 task 读取一次 `weight[c]`，允许同一 row 的不同 L tile 分配到不同 core，提高 `N*C` 较小、`L` 很大场景的核间并行度。
 - input/output 使用 double buffer queue。
 - bfloat16 路径升精度到 float32 计算；float16 路径按当前实现直接用 float16 计算。
 
@@ -618,10 +750,10 @@ CopyLocalToGmPad(outputGMY[gmOffset], yLocal, realLen);
 
 - 支持 scalar weight `[1]`。
 - 支持 channel weight `[C]` 时 rank >= 2 的输入，固定第 0 维为 N、第 1 维为 C，后续维度乘积为 L。
-- channel 路径支持 full-L 和 split-L：当 `AlignUp(L, 32 / sizeof(T)) <= tileLength` 时一次处理完整 L；否则 row 内按 `tileLength` 分段处理。
+- channel 路径支持 full-L、普通 split-L 和 split-L parallel：当 `AlignUp(L, 32 / sizeof(T)) <= tileLength` 时一次处理完整 L；否则根据 `rowNum` 与 task 数选择 row 内分段或 task 级并行分段。
 - L 不要求 32B 对齐；输入和输出按真实长度使用 `DataCopyPad` 搬运，计算按每段对齐后的 `computeLen` 执行。
 - 不支持按非第 1 维做 channel broadcast。
-- `LoadBf16ScalarAsFloat` 当前未被实际调用。
+- bfloat16 weight 标量读取使用 `LoadBf16ScalarAsFloat` 做位转换，避免依赖部分 CANN 版本不支持的 `AscendC::Cast(bfloat16_t)` 标量重载。
 
 ---
 
@@ -637,23 +769,27 @@ CopyLocalToGmPad(outputGMY[gmOffset], yLocal, realLen);
 - [ ] `weight` 为 `[C]` 时校验 `x` rank >= 2，且 `weightSize == x.shape[1]`。
 - [ ] `weight` 为 `[C]` 时计算 `N=x.shape[0]`、`C=x.shape[1]`、`L=prod(x.shape[2:])`，rank 为 2 时 `L=1`。
 - [ ] `weight` 为 `[C]` 时安全计算 `innerSize=L`、`rowNum=N*C`、`innerSizeAligned=AlignUp(L, 32 / sizeof(T))`，并做正数和 `int64_t` 溢出保护。
-- [ ] `weight` 为 `[C]` 时不因 `innerSizeAligned > tileLength` 失败；该场景应选择 `PRELU_TPL_CHANNEL_SPLIT_L_MODE`。
+- [ ] `weight` 为 `[C]` 时不因 `innerSizeAligned > tileLength` 失败；该场景应继续在 `PRELU_TPL_CHANNEL_SPLIT_L_MODE` 与 `PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE` 中选择。
 - [x] workspace size 为 0。
-- [ ] tiling data 新增并写入 `weightSize/weightMode/channelSize/innerSize/innerSizeAligned/rowNum/baseRows/extraRows`。
-- [ ] `weightMode=0` 时设置 `PRELU_TPL_SCALAR_MODE` tilingKey；`weightMode=1` 且 full-L 条件满足时设置 `PRELU_TPL_CHANNEL_FULL_L_MODE`；否则设置 `PRELU_TPL_CHANNEL_SPLIT_L_MODE`。
+- [ ] tiling data 新增并写入 `weightSize/weightMode/channelSize/innerSize/innerSizeAligned/rowNum/baseRows/extraRows/tilesPerRow/totalTaskNum/baseTasks/extraTasks`。
+- [ ] `weightMode=1` 且 `innerSizeAligned > tileLength` 时使用 `uint64_t` 中间变量计算 `tilesPerRow/totalTaskNum`，写入 `int64_t` tiling 字段前检查不超过 `int64_t::max()`。
+- [ ] `weightMode=0` 时设置 `PRELU_TPL_SCALAR_MODE` tilingKey；`weightMode=1` 且 full-L 条件满足时设置 `PRELU_TPL_CHANNEL_FULL_L_MODE`；`rowNum < coreNum && totalTaskNum > rowNum` 时设置 `PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE`；否则设置 `PRELU_TPL_CHANNEL_SPLIT_L_MODE`。
+- [ ] split-L parallel 路径使用 `usedCoreNum = min(coreNum, totalTaskNum)`，普通 channel row 路径使用 `usedCoreNum = min(coreNum, rowNum)`，`SetBlockDim` 必须使用当前路径对应的 `usedCoreNum`。
 - [ ] scalar/channel 的 tiling 字段分支清晰，Host 不依赖未使用字段的值。
 
 ### 7.2 Kernel 侧
 
-- [ ] `prelu_tiling_key.h` 定义 `PRELU_TPL_SCALAR_MODE`、`PRELU_TPL_CHANNEL_FULL_L_MODE` 和 `PRELU_TPL_CHANNEL_SPLIT_L_MODE`，不再使用语义模糊的 `PRELU_TPL_SCH_MODE_0/1`。
-- [ ] Kernel 入口根据 `schMode` 使用 `if constexpr` 编译期分发到 `InitScalar/ProcessScalar`、`InitChannel/ProcessChannelFullL` 或 `InitChannel/ProcessChannelSplitL`，不能用运行时 `if (weightMode)` 作为主执行路径选择。
+- [ ] `prelu_tiling_key.h` 定义 `PRELU_TPL_SCALAR_MODE`、`PRELU_TPL_CHANNEL_FULL_L_MODE`、`PRELU_TPL_CHANNEL_SPLIT_L_MODE` 和 `PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE`，不再使用语义模糊的 `PRELU_TPL_SCH_MODE_0/1`。
+- [ ] Kernel 入口根据 `schMode` 使用 `if constexpr` 编译期分发到 `InitScalar/ProcessScalar`、`InitChannel/ProcessChannelFullL`、`InitChannel/ProcessChannelSplitL` 或 `InitChannelSplitLParallel/ProcessChannelSplitLParallel`，不能用运行时 `if (weightMode)` 作为主执行路径选择。
 - [x] 根据 blockIdx 计算当前 core 的 GM offset 和 blockLength。
 - [x] Init 阶段读取 scalar weight。
 - [ ] channel 路径根据 `baseRows/extraRows` 和 blockIdx 计算 `rowOffset/blockRowNum`。
+- [ ] split-L parallel 路径根据 `baseTasks/extraTasks` 和 blockIdx 计算 `taskOffset/taskNum`。
 - [ ] channel 路径每次循环读取一个 `weight[c]`。
 - [ ] channel full-L 路径每次 `CopyIn/Compute/CopyOut` 处理一个完整 L 段：CopyIn/CopyOut 使用真实 L，Compute 使用 `innerSizeAligned`。
 - [ ] channel split-L 路径 row 内按 `tileLength` 分段，每个分段独立计算 `realLen/computeLen/gmOffset`。
-- [ ] channel 路径只以 `rowOffset/blockRowNum/innerSize/innerSizeAligned/tileLength` 作为循环与搬运依据；`formerLength/tailLength/blockLength` 不能参与 channel row 分配或循环边界。
+- [ ] channel split-L parallel 路径按 task 解码 `rowIdx/tileIdx/tileOffset`，每个 task 独立计算 `realLen/computeLen/gmOffset`。
+- [ ] channel row 路径只以 `rowOffset/blockRowNum/innerSize/innerSizeAligned/tileLength` 作为循环与搬运依据；split-L parallel 路径只以 `taskOffset/taskNum/tilesPerRow/innerSize/tileLength` 作为循环与搬运依据；`formerLength/tailLength/blockLength` 不能参与 channel 分配或循环边界。
 - [ ] queue 和临时 buffer 按 `tileLength` 初始化，不能按 `realLen` 初始化。
 - [ ] 保证 full-L 的 `innerSizeAligned <= tileLength`，split-L 每段 `computeLen <= tileLength`，padding 区位于已分配 UB 内；是否将 padding 区清零为可选实现策略。
 - [x] input/output queue 使用 `BUFFER_NUM=2`。
@@ -666,8 +802,8 @@ CopyLocalToGmPad(outputGMY[gmOffset], yLocal, realLen);
 
 - scalar weight shape `[1]`，覆盖 float16、float32、bfloat16。
 - channel weight shape `[C]`，覆盖 x shape `[N, C]`、`[N, C, L]`、`[N, C, H, W]` 和更高 rank。
-- Host tiling UT 需要校验 scalar case 返回 `PRELU_TPL_SCALAR_MODE`，channel 小 L case 返回 `PRELU_TPL_CHANNEL_FULL_L_MODE`，channel 大 L case 返回 `PRELU_TPL_CHANNEL_SPLIT_L_MODE`。
-- Kernel UT 中 scalar/full-L/split-L case 分别使用对应 `ICPU_SET_TILING_KEY` 和模板实例。
+- Host tiling UT 需要校验 scalar case 返回 `PRELU_TPL_SCALAR_MODE`，channel 小 L case 返回 `PRELU_TPL_CHANNEL_FULL_L_MODE`，channel 大 L 且 `rowNum >= coreNum` case 返回 `PRELU_TPL_CHANNEL_SPLIT_L_MODE`，channel 大 L 且 `rowNum < coreNum && totalTaskNum > rowNum` case 返回 `PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE`。
+- Kernel UT 中 scalar/full-L/split-L/split-L parallel case 分别使用对应 `ICPU_SET_TILING_KEY` 和模板实例。
 - channel 路径覆盖 `N > 1`、`C > 1`、不同 `L=prod(x.shape[2:])`，并验证每个 channel 使用对应 `weight[c]`。
 - x shape 覆盖 scalar 路径的 1D、2D、4D 和非 32B 对齐尾块。
 - 数值覆盖正数、负数、0。

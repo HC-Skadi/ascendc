@@ -45,9 +45,12 @@ public:
         GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe);
     __aicore__ inline void InitChannel(
         GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe);
+    __aicore__ inline void InitChannelSplitLParallel(
+        GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe);
     __aicore__ inline void ProcessScalar();
     __aicore__ inline void ProcessChannelFullL();
     __aicore__ inline void ProcessChannelSplitL();
+    __aicore__ inline void ProcessChannelSplitLParallel();
 
 private:
     __aicore__ inline void CopyIn(int64_t progress, uint32_t currentNum);
@@ -79,6 +82,9 @@ private:
     int64_t innerSizeAligned = 1;
     int64_t rowOffset = 0;
     int64_t blockRowNum = 0;
+    int64_t taskOffset = 0;
+    int64_t taskNum = 0;
+    int64_t tilesPerRow = 0;
 };
 
 __aicore__ inline float LoadBf16ScalarAsFloat(GM_ADDR weight)
@@ -159,6 +165,36 @@ __aicore__ inline void Prelu<T>::InitChannel(
     } else {
         blockRowNum = 0;
         rowOffset = 0;
+    }
+
+    inputGMX.SetGlobalBuffer((__gm__ T*)x, tilingData->totalLength);
+    outputGMY.SetGlobalBuffer((__gm__ T*)y, tilingData->totalLength);
+
+    InitBuffers();
+}
+
+template <typename T>
+__aicore__ inline void Prelu<T>::InitChannelSplitLParallel(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe)
+{
+    pipe_ = pipe;
+    int64_t blockIdx = GetBlockIdx();
+    ubLength = tilingData->tileLength;
+    channelSize = tilingData->channelSize;
+    innerSize = tilingData->innerSize;
+    tilesPerRow = tilingData->tilesPerRow;
+    weightGM = weight;
+
+    if (blockIdx < tilingData->extraTasks) {
+        taskNum = tilingData->baseTasks + 1;
+        taskOffset = blockIdx * (tilingData->baseTasks + 1);
+    } else if (blockIdx < tilingData->usedCoreNum) {
+        taskNum = tilingData->baseTasks;
+        taskOffset = tilingData->extraTasks * (tilingData->baseTasks + 1) +
+                     (blockIdx - tilingData->extraTasks) * tilingData->baseTasks;
+    } else {
+        taskNum = 0;
+        taskOffset = 0;
     }
 
     inputGMX.SetGlobalBuffer((__gm__ T*)x, tilingData->totalLength);
@@ -285,6 +321,28 @@ __aicore__ inline void Prelu<T>::ProcessChannelSplitL()
             Compute(computeLen);
             CopyOutByOffset(gmOffset, realLen);
         }
+    }
+}
+
+template <typename T>
+__aicore__ inline void Prelu<T>::ProcessChannelSplitLParallel()
+{
+    uint32_t alignElements = static_cast<uint32_t>(32U / sizeof(T));
+    for (int64_t taskProgress = 0; taskProgress < taskNum; ++taskProgress) {
+        int64_t taskIdx = taskOffset + taskProgress;
+        int64_t rowIdx = taskIdx / tilesPerRow;
+        int64_t tileIdx = taskIdx % tilesPerRow;
+        int64_t tileOffset = tileIdx * ubLength;
+        int64_t remainLen = innerSize - tileOffset;
+        uint32_t realLen = static_cast<uint32_t>(remainLen > ubLength ? ubLength : remainLen);
+        uint32_t computeLen = AlignUp(realLen, alignElements);
+        int64_t channelIdx = rowIdx % channelSize;
+        int64_t gmOffset = rowIdx * innerSize + tileOffset;
+
+        LoadChannelWeight(channelIdx);
+        CopyInByOffset(gmOffset, realLen, computeLen);
+        Compute(computeLen);
+        CopyOutByOffset(gmOffset, realLen);
     }
 }
 
