@@ -161,8 +161,8 @@ struct PreluTilingData {
 | `CHANNEL_FULL_L_MODE` | channel 模式，且 `AlignUp(L, 32 / sizeof(T)) <= tileLength` | 每个 `(n,c)` row 一次处理完整 L |
 | `CHANNEL_SPLIT_L_MODE` | channel 模式，L 超过 UB，且 row 级并行足够或 task 级并行收益不足 | 每个 `(n,c)` row 内按 L 分段 |
 | `CHANNEL_SPLIT_L_PARALLEL_MODE` | `rowNum * 2 <= coreNum` 且 L 足够大，拆 task 后至少使用 2 倍 row 数的 core | 每个 task 处理一个 `(rowIdx, tileIdx)` |
-| `CHANNEL_NC_WEIGHT_REUSE_MODE` | `L == 1`，或 `L <= 16 && C >= 64` 且 UB 可缓存整条 C 维 weight 并容纳至少一行 `C * L` 计算数据 | 缓存整条 C 维 weight，按 N row 处理 |
-| `CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_MODE` | NC 场景，整条 C 维 weight 放不进 UB，但 C 分块可放入 UB | 每个 task 处理一个 `(nIdx, cTileIdx)` |
+| `CHANNEL_NC_WEIGHT_REUSE_MODE` | `L == 1`，或 `L <= 16 && C >= 32` 且 UB 可缓存整条 C 维 weight 并容纳至少一行 `C * L` 计算数据 | 缓存整条 C 维 weight，按 N row 处理 |
+| `CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_MODE` | NC 或 small-L 场景，整行 `C * L` 放不进 UB，但 C 分块可放入 UB | 每个 task 处理一个 `(nIdx, cTileIdx)` |
 
 Kernel 入口通过模板参数 `schMode` 编译期分发，不在主流程中用运行时 `weightMode` 切路径。
 
@@ -295,15 +295,15 @@ if (rowNum * 2 <= coreLimit && innerSize >= 2 * (CORE_ALIGN_SIZE / typeLength)) 
 
 ### 4.7 NC / small-L weight reuse 与 split-C reuse
 
-该模式优化 NC 类 channel 场景以及大 C、小 L 场景。NC 场景即 `L == 1`，不仅包含 rank=2 的 `[N, C]`，也包含 `[N, C, 1]`、`[N, C, 1, 1]` 以及更高 rank 但 `prod(x.shape[2:]) == 1` 的形状；Host 侧统一将这些形状视为 `[N, C]` 处理。大 C、小 L 场景指 `L <= 16 && C >= 64`，且整行 `C * L` 能放入 UB。
+该模式优化 NC 类 channel 场景以及大 C、小 L 场景。NC 场景即 `L == 1`，不仅包含 rank=2 的 `[N, C]`，也包含 `[N, C, 1]`、`[N, C, 1, 1]` 以及更高 rank 但 `prod(x.shape[2:]) == 1` 的形状；Host 侧统一将这些形状视为 `[N, C]` 处理。大 C、小 L 场景指 `L <= 16 && C >= 32`，且整行 `C * L` 能放入 UB。
 
 进入 weight reuse 不再要求 `N >= coreLimit`，也不使用固定 `C <= 256` 作为硬门槛。只要 UB 能容纳对齐后的 weight cache 和至少一行计算数据，即优先使用 weight reuse 路径。这样小 N 的 NC 场景可以按整行 `[C]` 向量化计算；大 C、小 L 场景可以按整行 `[C,L]` 搬运和计算，避免 full-L 路径把每个 `(n,c)` 小 row 拆开处理。
 
-当 `L == 1` 且 C 较大导致整条 `weight[0:C]` 放不进 UB，但某个 C 分块可以放入 UB 时，进入 NC split-C weight reuse。该路径按 C 维分块缓存 weight，每个 task 处理一个 `(nIdx, cTileIdx)`，保留连续搬运和 vector `Mul`，避免退回普通 full-L 的单元素 row 调度。`L > 1` 时当前不启用 split-C reuse，若整行 `C * L` 放不下 UB，则回退到常规 channel full/split 路径。
+当 C 较大导致整行 `C * L` 放不进 UB，但某个 C 分块可以放入 UB 时，进入 split-C weight reuse。该路径按 C 维分块缓存 weight，每个 task 处理一个 `(nIdx, cTileIdx)`，保留连续搬运和 vector `Mul`，避免退回普通 full-L 的小 row 调度。
 
 触发条件：
 
-- `innerSize == 1`，或 `innerSize <= 16 && channelSize >= 64`
+- `innerSize == 1`，或 `innerSize <= 16 && channelSize >= 32`
 - `channelSize > 1`
 - `batchSize = rowNum / channelSize > 0`
 - UB 可以容纳对齐后的整条 C 维 weight cache 和至少一行 `[C,L]` 计算数据
@@ -333,7 +333,7 @@ ncMaxTileElements =
 
 当 `batchSize < coreLimit` 时，该分支只启动 `batchSize` 个 core；这是有意的。该模式中每个 core 处理一行或多行连续 `C * L` 数据，并复用 UB 中的 weight vector。相比 full-L 模式按 `(n,c)` row 调度，weight reuse 更适合小 L 场景的向量化和减少 weight GM 访问。
 
-当 `L == 1` 且整条 C 放不下时，继续尝试 split-C：
+当整行 `C * L` 放不下时，继续尝试 split-C。`L == 1` 时按 C 元素估算：
 
 ```cpp
 splitCBytesPerElement = weightCacheBytesPerElement + GetNcWeightReuseBufferBytesPerElement(dataType);
@@ -353,6 +353,29 @@ usedCoreNum = min(coreLimit, totalTaskNum);
 - `extraTasks = totalTaskNum % usedCoreNum`
 
 若连一个 C 分块都无法放入 UB，再回退到普通 channel full-L 路径。实际实现可保留一个非常宽松的保护上限用于防止异常 shape，但该上限不应替代 UB 容量判断。
+
+`L > 1` 时按 C channel 估算分块大小：
+
+```cpp
+splitCBytesPerChannel =
+    weightCacheBytesPerElement +
+    GetNcWeightReuseBufferBytesPerElement(dataType) * innerSize;
+splitCTileChannels = AlignDown(usableUbSize / splitCBytesPerChannel, 32 / sizeof(T));
+alignedSplitCElements = AlignUp(splitCTileChannels * innerSize, 32 / sizeof(T));
+cTileNum = CeilDiv(C, splitCTileChannels);
+totalTaskNum = N * cTileNum;
+usedCoreNum = min(coreLimit, totalTaskNum);
+```
+
+该分支写入：
+
+- `tileLength = splitCTileChannels`，表示每个 C tile 的 channel 数
+- `innerSizeAligned = alignedSplitCElements`，表示每个 C tile 的计算元素数
+- `tilesPerRow = cTileNum`
+- `baseTasks = totalTaskNum / usedCoreNum`
+- `extraTasks = totalTaskNum % usedCoreNum`
+
+例如 `[1, 2048, 7]` 在 256KB UB、float32 下整行 `2048 * 7` 放不进整行 weight reuse，但可按 C 分成 2 个 task，`usedCoreNum=2`，避免 full-L 路径按 `N*C=2048` 个小 row 分到 40 个核。
 
 ---
 
@@ -451,7 +474,7 @@ gmOffset = rowIdx * innerSize + tileOffset;
 
 ### 5.6 NC / small-L weight reuse
 
-NC / small-L weight reuse 模式面向 `L == 1` 的 NC 类输入，以及 `L <= 16 && C >= 64` 且整行 `C * L` 可放入 UB 的大 C、小 L 输入。Init 阶段一次性把 `weight[0:C]` 复制到 UB，并按 32B 对齐；bfloat16 还会额外转换出 float weight cache。
+NC / small-L weight reuse 模式面向 `L == 1` 的 NC 类输入，以及 `L <= 16 && C >= 32` 且整行 `C * L` 可放入 UB 的大 C、小 L 输入。Init 阶段一次性把 `weight[0:C]` 复制到 UB，并按 32B 对齐；bfloat16 还会额外转换出 float weight cache。
 
 处理流程：
 
@@ -485,7 +508,7 @@ for (channelIdx = 0; channelIdx < C; ++channelIdx) {
 
 ### 5.7 NC split-C weight reuse
 
-split-C 模式面向 `L == 1` 且 C 较大的 NC 类输入。Init 阶段不缓存整条 C 维 weight，而是按 task 动态缓存当前 C 分块。
+split-C 模式面向 `L == 1` 且 C 较大的 NC 类输入，以及 `L <= 16 && C >= 32` 但整行 `C * L` 放不进 UB 的 small-L 输入。Init 阶段不缓存整条 C 维 weight，而是按 task 动态缓存当前 C 分块。
 
 每个 task 解码为一个 `(nIdx, cTileIdx)`：
 
@@ -494,21 +517,23 @@ taskIdx = taskOffset + taskProgress;
 nIdx = taskIdx / tilesPerRow;
 cTileIdx = taskIdx % tilesPerRow;
 cOffset = cTileIdx * alignedChannelSize;
-realC = min(alignedChannelSize, C - cOffset);
-gmOffset = nIdx * C + cOffset;
+realC = min(cTileChannels, C - cOffset);
+realLen = realC * L;
+computeLen = AlignUp(realLen, 32 / sizeof(T));
+gmOffset = nIdx * C * L + cOffset * L;
 ```
 
 处理流程：
 
 ```cpp
-CopyWeightTile(cOffset, realC, alignedChannelSize);
-CopyInByOffset(gmOffset, realC, alignedChannelSize);
+CopyWeightTile(cOffset, realC, AlignUp(realC, 32 / sizeof(T)));
+CopyInByOffset(gmOffset, realLen, computeLen);
 BuildNcWeightVec(1);
-ComputeNc(alignedChannelSize);
-CopyOutByOffset(gmOffset, realC);
+ComputeNc(computeLen);
+CopyOutByOffset(gmOffset, realLen);
 ```
 
-最后一个 C 分块可能不足 `alignedChannelSize`，通过 `DataCopyPad` 补齐计算，CopyOut 只写回真实 `realC`。该路径比普通 full-L 对大 C 的 `[N,C]` 场景更友好，因为单次搬运和计算粒度是 C 分块，而不是单个 `(n,c)` 元素。
+最后一个 C 分块可能不足 `cTileChannels`，通过 `DataCopyPad` 补齐计算，CopyOut 只写回真实 `realLen`。该路径比普通 full-L 对大 C、小 L 场景更友好，因为单次搬运和计算粒度是 C 分块内的连续 `Ctile * L`，而不是单个 `(n,c)` 小 row。
 
 ---
 
@@ -533,8 +558,8 @@ CopyOutByOffset(gmOffset, realC);
 - channel full-L 避免 row 内循环，适合 L 可放入 UB 的场景。
 - channel split-L 支持大 L，不要求完整 L 放入 UB。
 - channel split-L parallel 通过拆分 L 维 task 提升 `N*C` 较小、L 很大时的 AIV 利用率。
-- NC / small-L weight reuse 针对 `L == 1` 的 NC 类场景，以及 `L <= 16 && C >= 64` 且整行 `C * L` 可放入 UB 的大 C、小 L 场景，把 weight 缓存在 UB，减少重复读取并使用 vector `Mul`。
-- NC split-C reuse 针对 C 较大、整条 C 放不进 UB 的 NC 类场景，按 C 分块缓存 weight，避免退回单元素 full-L。
+- NC / small-L weight reuse 针对 `L == 1` 的 NC 类场景，以及 `L <= 16 && C >= 32` 且整行 `C * L` 可放入 UB 的大 C、小 L 场景，把 weight 缓存在 UB，减少重复读取并使用 vector `Mul`。
+- NC / small-L split-C reuse 针对 C 较大、整行 `C * L` 放不进 UB 的场景，按 C 分块缓存 weight，避免退回小 row full-L。
 - float16/float32 直接按原 dtype vector 计算；bfloat16 升到 float32 计算。
 
 ### 7.2 当前限制
@@ -543,9 +568,8 @@ CopyOutByOffset(gmOffset, realC);
 - `weight` 必须是一维 tensor，不支持 0-D scalar。
 - channel broadcast 固定使用第 1 维 C，不支持按其他维度 broadcast。
 - `x/weight/y` dtype 必须一致。
-- NC / small-L weight reuse 在 `L == 1`，或 `L <= 16 && C >= 64` 且 UB 能容纳整条 C 维 weight 与至少一行 `C * L` 计算数据时启用；不再以 `N >= coreLimit` 或固定 `C <= 256` 作为硬条件。
-- NC split-C reuse 在 `L == 1` 且整条 C 放不进 UB、但 C 分块可放入 UB 时启用。
-- `L > 1` 且整行 `C * L` 放不进 UB 时，当前不做 split-C-with-L，回退到常规 channel full/split 路径。
+- NC / small-L weight reuse 在 `L == 1`，或 `L <= 16 && C >= 32` 且 UB 能容纳整条 C 维 weight 与至少一行 `C * L` 计算数据时启用；不再以 `N >= coreLimit` 或固定 `C <= 256` 作为硬条件。
+- NC / small-L split-C reuse 在整行 `C * L` 放不进 UB、但 C 分块可放入 UB 时启用。
 
 ---
 
@@ -558,6 +582,7 @@ CopyOutByOffset(gmOffset, realC);
 - channel full-L：`x=[2,3,5], weight=[3]`
 - NC weight reuse：`x=[64,3], weight=[3]`
 - small-L weight reuse：`x=[8,128,4], weight=[128]`
+- small-L split-C weight reuse：`x=[1,2048,7], weight=[2048]`
 - channel split-L：`x=[64,2,20000], weight=[2]`
 - split-L 收益不足 fallback：`x=[16,2,20000], weight=[2]`
 - split-L parallel：`x=[1,2,20000], weight=[2]`
@@ -569,6 +594,7 @@ CopyOutByOffset(gmOffset, realC);
 - channel NC weight reuse kernel
 - channel small-L weight reuse kernel
 - channel NC split-C weight reuse kernel
+- channel small-L split-C weight reuse kernel
 - channel split-L kernel
 - channel split-L parallel kernel
 
@@ -580,7 +606,7 @@ CopyOutByOffset(gmOffset, realC);
 - split-C 边界：大 C case 验证 tilingKey 为 `CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_MODE`，并覆盖最后一个 C 分块非对齐。
 - 小 N 的 NC 类场景，例如 `[1, 3]`、`[2, 64]`、`[1, 1024, 1, 1]`，确认仍进入 NC weight reuse 分支。
 - 等价 shape：`[N, C]`、`[N, C, 1]`、`[N, C, 1, 1]` 的 tilingKey 和计算结果一致。
-- 大 C、小 L 场景，例如 `[8,128,2]`、`[8,128,4]`、`[4,1024,8]`，确认整行可放入 UB 时进入 weight reuse，整行放不下时回退常规 channel 路径。
+- 大 C、小 L 场景，例如 `[8,128,2]`、`[8,128,4]`、`[4,1024,8]`，确认整行可放入 UB 时进入 weight reuse，整行放不下但 C 分块可放入 UB 时进入 split-C weight reuse。
 
 ---
 

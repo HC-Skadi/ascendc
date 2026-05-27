@@ -100,8 +100,10 @@ private:
     int64_t taskOffset = 0;
     int64_t taskNum = 0;
     int64_t tilesPerRow = 0;
+    int64_t cTileLength = 1;
     int64_t alignedChannelSize = 1;
     int64_t alignedWeightSize = 1;
+    int64_t activeChannelSize = 1;
     int64_t rowsPerTile = 1;
 };
 
@@ -251,6 +253,7 @@ __aicore__ inline void Prelu<T>::InitChannelNcWeightReuse(
     innerSize = tilingData->innerSize;
     alignedChannelSize = tilingData->innerSizeAligned;
     alignedWeightSize = AlignUp(static_cast<uint32_t>(channelSize), static_cast<uint32_t>(32U / sizeof(T)));
+    activeChannelSize = channelSize;
     rowsPerTile = ubLength / alignedChannelSize;
     weightGM = weight;
 
@@ -290,11 +293,13 @@ __aicore__ inline void Prelu<T>::InitChannelNcSplitCWeightReuse(
 {
     pipe_ = pipe;
     int64_t blockIdx = GetBlockIdx();
-    ubLength = tilingData->tileLength;
     channelSize = tilingData->channelSize;
     innerSize = tilingData->innerSize;
+    cTileLength = tilingData->tileLength;
+    ubLength = innerSize == 1 ? tilingData->tileLength : tilingData->innerSizeAligned;
     alignedChannelSize = tilingData->innerSizeAligned;
-    alignedWeightSize = alignedChannelSize;
+    alignedWeightSize = innerSize == 1 ? alignedChannelSize : cTileLength;
+    activeChannelSize = alignedWeightSize;
     tilesPerRow = tilingData->tilesPerRow;
     weightGM = weight;
 
@@ -415,7 +420,7 @@ __aicore__ inline void Prelu<T>::BuildNcWeightVec(int64_t tileRows)
             }
         } else {
             int64_t localOffset = 0;
-            for (int64_t channelIdx = 0; channelIdx < channelSize; ++channelIdx) {
+            for (int64_t channelIdx = 0; channelIdx < activeChannelSize; ++channelIdx) {
                 float weightValue = weightLocal.GetValue(channelIdx);
                 for (int64_t innerIdx = 0; innerIdx < innerSize; ++innerIdx) {
                     weightVec.SetValue(localOffset + innerIdx, weightValue);
@@ -439,7 +444,7 @@ __aicore__ inline void Prelu<T>::BuildNcWeightVec(int64_t tileRows)
             }
         } else {
             int64_t localOffset = 0;
-            for (int64_t channelIdx = 0; channelIdx < channelSize; ++channelIdx) {
+            for (int64_t channelIdx = 0; channelIdx < activeChannelSize; ++channelIdx) {
                 T weightValue = weightLocal.GetValue(channelIdx);
                 for (int64_t innerIdx = 0; innerIdx < innerSize; ++innerIdx) {
                     weightVec.SetValue(localOffset + innerIdx, weightValue);
@@ -495,6 +500,7 @@ __aicore__ inline void Prelu<T>::CopyWeightTile(int64_t cOffset, uint32_t realC,
     weightTensor.SetGlobalBuffer((__gm__ T*)weightGM + cOffset, realC);
     LocalTensor<T> weightLocal = weightBuf.Get<T>();
     CopyGmToLocalPad(weightLocal, weightTensor, realC, alignedC);
+    activeChannelSize = realC;
     PipeBarrier<PIPE_ALL>();
     if constexpr (std::is_same_v<T, bfloat16_t>) {
         LocalTensor<float> weightFp32 = weightFp32Buf.Get<float>();
@@ -608,21 +614,26 @@ __aicore__ inline void Prelu<T>::ProcessChannelNcWeightReuse()
 template <typename T>
 __aicore__ inline void Prelu<T>::ProcessChannelNcSplitCWeightReuse()
 {
+    uint32_t alignElements = static_cast<uint32_t>(32U / sizeof(T));
     for (int64_t taskProgress = 0; taskProgress < taskNum; ++taskProgress) {
         int64_t taskIdx = taskOffset + taskProgress;
         int64_t nIdx = taskIdx / tilesPerRow;
         int64_t cTileIdx = taskIdx % tilesPerRow;
-        int64_t cOffset = cTileIdx * alignedChannelSize;
+        int64_t cTileChannels = innerSize == 1 ? alignedChannelSize : cTileLength;
+        int64_t cOffset = cTileIdx * cTileChannels;
         int64_t remainC = channelSize - cOffset;
-        uint32_t realC = static_cast<uint32_t>(remainC > alignedChannelSize ? alignedChannelSize : remainC);
-        uint32_t computeLen = static_cast<uint32_t>(alignedChannelSize);
-        int64_t gmOffset = nIdx * channelSize + cOffset;
+        uint32_t realC = static_cast<uint32_t>(remainC > cTileChannels ? cTileChannels : remainC);
+        uint32_t realLen = static_cast<uint32_t>(realC * innerSize);
+        uint32_t computeLen = innerSize == 1 ? static_cast<uint32_t>(alignedChannelSize) :
+            AlignUp(realLen, alignElements);
+        uint32_t weightLen = innerSize == 1 ? computeLen : AlignUp(realC, alignElements);
+        int64_t gmOffset = nIdx * channelSize * innerSize + cOffset * innerSize;
 
-        CopyWeightTile(cOffset, realC, computeLen);
-        CopyInByOffset(gmOffset, realC, computeLen);
+        CopyWeightTile(cOffset, realC, weightLen);
+        CopyInByOffset(gmOffset, realLen, computeLen);
         BuildNcWeightVec(1);
         ComputeNc(computeLen);
-        CopyOutByOffset(gmOffset, realC);
+        CopyOutByOffset(gmOffset, realLen);
     }
 }
 
