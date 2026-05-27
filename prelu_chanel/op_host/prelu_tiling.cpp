@@ -20,6 +20,8 @@ constexpr uint32_t WS_SYS_SIZE = 0U;
 constexpr uint32_t BLOCK_SIZE = 32U;
 constexpr uint32_t CORE_ALIGN_SIZE = 512U;
 constexpr int64_t MAX_AIV_CORE_NUM = 40;
+constexpr uint64_t MIN_PARALLEL_TILE_NUM = 2U;
+constexpr int64_t NC_WEIGHT_REUSE_MAX_CHANNEL_SIZE = 256;
 constexpr uint64_t UB_RESERVED_SIZE = 1024U;
 
 static ge::graphStatus GetPlatformInfo(gert::TilingContext* context, uint64_t& ubSize, int64_t& coreNum)
@@ -154,6 +156,17 @@ static uint64_t GetBufferBytesPerElement(ge::DataType dataType)
     return 20U;
 }
 
+static uint64_t GetNcWeightReuseBufferBytesPerElement(ge::DataType dataType)
+{
+    if (dataType == ge::DT_FLOAT) {
+        return 28U;
+    }
+    if (dataType == ge::DT_FLOAT16) {
+        return 14U;
+    }
+    return 24U;
+}
+
 static uint64_t CeilDiv(uint64_t value, uint64_t factor)
 {
     return (value + factor - 1U) / factor;
@@ -167,9 +180,10 @@ static uint64_t AlignUp(uint64_t value, uint64_t align)
 static ge::graphStatus CalcTiling(
     gert::TilingContext* context, uint64_t ubSize, int64_t coreNum, int64_t totalNum, ge::DataType dataType,
     uint32_t typeLength, int64_t weightMode, int64_t channelSize, int64_t innerSize, int64_t rowNum,
-    PreluTilingData* tiling, uint32_t& usedCoreNum, bool& useSplitLParallel)
+    PreluTilingData* tiling, uint32_t& usedCoreNum, bool& useSplitLParallel, bool& useNcWeightReuse)
 {
     useSplitLParallel = false;
+    useNcWeightReuse = false;
     uint64_t bufferBytesPerElement = GetBufferBytesPerElement(dataType);
     uint64_t usableUbSize = (ubSize > UB_RESERVED_SIZE) ? (ubSize - UB_RESERVED_SIZE) : ubSize;
     uint64_t blockElementNum = BLOCK_SIZE / typeLength;
@@ -233,9 +247,39 @@ static ge::graphStatus CalcTiling(
     tiling->tailLength = 0;
     tiling->innerSizeAligned = static_cast<int64_t>(innerSizeAligned);
 
-    if (rowNumU64 < coreLimit) {
+    uint64_t batchSize = rowNumU64 / static_cast<uint64_t>(channelSize);
+    if (innerSize == 1 && channelSize > 1 && channelSize <= NC_WEIGHT_REUSE_MAX_CHANNEL_SIZE &&
+        batchSize >= coreLimit) {
+        uint64_t alignedChannelSize = AlignUp(static_cast<uint64_t>(channelSize), blockElementNum);
+        uint64_t weightCacheBytes = alignedChannelSize * typeLength;
+        if (dataType == ge::DT_BF16) {
+            weightCacheBytes += alignedChannelSize * sizeof(float);
+        }
+        OP_CHECK_IF(
+            weightCacheBytes >= usableUbSize,
+            OP_LOGE(context, "Prelu: UB is too small for NC weight reuse cache"),
+            return ge::GRAPH_FAILED);
+        uint64_t ncMaxTileElements =
+            ((usableUbSize - weightCacheBytes) / GetNcWeightReuseBufferBytesPerElement(dataType) /
+             alignedChannelSize) *
+            alignedChannelSize;
+        if (ncMaxTileElements >= alignedChannelSize) {
+            uint64_t finalCoreNum = std::min(coreLimit, batchSize);
+            tiling->tileLength = static_cast<int64_t>(ncMaxTileElements);
+            tiling->innerSizeAligned = static_cast<int64_t>(alignedChannelSize);
+            tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
+            tiling->baseRows = static_cast<int64_t>(batchSize / finalCoreNum);
+            tiling->extraRows = static_cast<int64_t>(batchSize % finalCoreNum);
+            usedCoreNum = static_cast<uint32_t>(finalCoreNum);
+            useNcWeightReuse = true;
+            return ge::GRAPH_SUCCESS;
+        }
+    }
+
+    uint64_t minParallelTileLength = CORE_ALIGN_SIZE / typeLength;
+    uint64_t minParallelL = minParallelTileLength * MIN_PARALLEL_TILE_NUM;
+    if (rowNumU64 * 2U <= coreLimit && static_cast<uint64_t>(innerSize) >= minParallelL) {
         uint64_t targetTilesPerRow = CeilDiv(coreLimit, rowNumU64);
-        uint64_t minParallelTileLength = CORE_ALIGN_SIZE / typeLength;
         uint64_t parallelTileLength =
             AlignUp(CeilDiv(static_cast<uint64_t>(innerSize), targetTilesPerRow), minParallelTileLength);
         parallelTileLength = std::max(parallelTileLength, minParallelTileLength);
@@ -256,8 +300,9 @@ static ge::graphStatus CalcTiling(
             OP_LOGE(context, "Prelu: totalTaskNum exceeds int64 range"),
             return ge::GRAPH_FAILED);
 
-        if (totalTaskNum > rowNumU64) {
-            uint64_t finalCoreNum = std::min(coreLimit, totalTaskNum);
+        uint64_t finalCoreNum = std::min(coreLimit, totalTaskNum);
+        uint64_t minBenefitCoreNum = std::min(coreLimit, rowNumU64 * 2U);
+        if (finalCoreNum >= minBenefitCoreNum) {
             tiling->tileLength = static_cast<int64_t>(parallelTileLength);
             tiling->tilesPerRow = static_cast<int64_t>(tilesPerRow);
             tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
@@ -318,9 +363,10 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
 
     uint32_t usedCoreNum = 1;
     bool useSplitLParallel = false;
+    bool useNcWeightReuse = false;
     OP_CHECK_IF(
         CalcTiling(context, ubSize, coreNum, totalNum, dataType, typeLength, weightMode, channelSize, innerSize,
-            rowNum, tiling, usedCoreNum, useSplitLParallel) != ge::GRAPH_SUCCESS,
+            rowNum, tiling, usedCoreNum, useSplitLParallel, useNcWeightReuse) != ge::GRAPH_SUCCESS,
         OP_LOGE(context, "CalcTiling error"),
         return ge::GRAPH_FAILED);
 
@@ -328,7 +374,9 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
 
     uint64_t tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_SCALAR_MODE);
     if (weightMode == 1) {
-        if (useSplitLParallel) {
+        if (useNcWeightReuse) {
+            tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_NC_WEIGHT_REUSE_MODE);
+        } else if (useSplitLParallel) {
             tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE);
         } else if (tiling->innerSizeAligned <= tiling->tileLength) {
             tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_FULL_L_MODE);

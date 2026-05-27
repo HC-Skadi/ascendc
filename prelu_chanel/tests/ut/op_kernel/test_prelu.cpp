@@ -150,6 +150,69 @@ TEST_F(PreluKernelTest, test_channel_weight_run)
     AscendC::GmFree(tiling);
 }
 
+TEST_F(PreluKernelTest, test_channel_nc_weight_reuse_run)
+{
+    constexpr size_t n = 4;
+    constexpr size_t c = 3;
+    constexpr size_t size = n * c;
+    constexpr size_t tilingDataSize = sizeof(PreluTilingData);
+    constexpr uint32_t numBlocks = 2;
+
+    constexpr size_t xByteSize = size * sizeof(float);
+    constexpr size_t weightByteSize = c * sizeof(float);
+    constexpr size_t yByteSize = size * sizeof(float);
+    std::vector<float> xHost(size);
+    for (size_t i = 0; i < size; ++i) {
+        xHost[i] = static_cast<float>(static_cast<int>(i % 9) - 4);
+    }
+    std::vector<float> weightHost = {0.1f, 0.2f, 0.3f};
+    std::vector<float> yHost(size, 0.0f);
+
+    uint8_t* x = (uint8_t*)AscendC::GmAlloc(xByteSize);
+    uint8_t* weight = (uint8_t*)AscendC::GmAlloc(weightByteSize);
+    uint8_t* y = (uint8_t*)AscendC::GmAlloc(yByteSize);
+    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(32);
+    uint8_t* tiling = (uint8_t*)AscendC::GmAlloc(tilingDataSize);
+    memset(tiling, 0, tilingDataSize);
+
+    memcpy(x, xHost.data(), xByteSize);
+    memcpy(weight, weightHost.data(), weightByteSize);
+
+    PreluTilingData* tilingData = reinterpret_cast<PreluTilingData*>(tiling);
+    tilingData->totalLength = size;
+    tilingData->usedCoreNum = numBlocks;
+    tilingData->formerNum = 0;
+    tilingData->formerLength = 0;
+    tilingData->tailLength = 0;
+    tilingData->tileLength = 16;
+    tilingData->channelSize = c;
+    tilingData->innerSize = 1;
+    tilingData->innerSizeAligned = 8;
+    tilingData->baseRows = 2;
+    tilingData->extraRows = 0;
+
+    ICPU_SET_TILING_KEY(PRELU_TPL_CHANNEL_NC_WEIGHT_REUSE_MODE);
+    AscendC::SetKernelMode(KernelMode::AIV_MODE);
+
+    ICPU_RUN_KF((prelu<PRELU_TPL_CHANNEL_NC_WEIGHT_REUSE_MODE>), numBlocks, x, weight, y, workspace, tiling);
+
+    memcpy(yHost.data(), y, yByteSize);
+    for (size_t row = 0; row < n; ++row) {
+        for (size_t col = 0; col < c; ++col) {
+            size_t offset = row * c + col;
+            float weightValue = weightHost[col];
+            float expected = xHost[offset] > 0.0f ? xHost[offset] : xHost[offset] * weightValue;
+            EXPECT_NEAR(yHost[offset], expected, 1e-6f);
+        }
+    }
+
+    AscendC::GmFree(x);
+    AscendC::GmFree(weight);
+    AscendC::GmFree(y);
+    AscendC::GmFree(workspace);
+    AscendC::GmFree(tiling);
+}
+
 TEST_F(PreluKernelTest, test_channel_weight_split_l_run)
 {
     constexpr size_t n = 1;

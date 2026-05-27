@@ -21,6 +21,9 @@ __global__ __aicore__ void prelu(GM_ADDR x, GM_ADDR weight, GM_ADDR y, GM_ADDR w
     if constexpr (schMode == PRELU_TPL_CHANNEL_FULL_L_MODE) {
         op.InitChannel(x, weight, y, &tilingData, &pipe);
         op.ProcessChannelFullL();
+    } else if constexpr (schMode == PRELU_TPL_CHANNEL_NC_WEIGHT_REUSE_MODE) {
+        op.InitChannelNcWeightReuse(x, weight, y, &tilingData, &pipe);
+        op.ProcessChannelNcWeightReuse();
     } else if constexpr (schMode == PRELU_TPL_CHANNEL_SPLIT_L_MODE) {
         op.InitChannel(x, weight, y, &tilingData, &pipe);
         op.ProcessChannelSplitL();
