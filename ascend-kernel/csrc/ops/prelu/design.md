@@ -1,115 +1,47 @@
 # PReLU Scalar/Channel 算子设计文档
 
-本文档根据当前 `/Users/hc/ascendc/prelu_chanel` 实现更新，用于同步 `ascend-kernel/csrc/ops/prelu` 的设计语义。
+本文档根据 `/Users/hc/ascendc/prelu_chanel` 当前实现维护，用于说明 scalar、channel、NC weight reuse、small/medium-L split-C weight reuse 等路径的设计语义。
 
 ## 1. 算子接口
-
-### 1.1 算子定义
 
 ```cpp
 Prelu(x, weight) -> y
 ```
 
-当前 `prelu_chanel` 是 CANN 自定义算子工程，接口由 `op_host/prelu_def.cpp` 注册：
+| 参数名 | 类型 | 输入/输出 | 支持类型 | 约束 |
+|--------|------|-----------|----------|------|
+| x | Tensor | 输入 | float16/float32/bfloat16 | ND，AutoContiguous |
+| weight | Tensor | 输入 | float16/float32/bfloat16 | 1-D，shape 为 `[1]` 或 `[C]` |
+| y | Tensor | 输出 | float16/float32/bfloat16 | shape 与 x 一致 |
 
-| 参数名 | 类型 | 输入/输出 | 支持的数据类型 | 描述 | 约束条件 |
-|--------|------|-----------|----------------|------|----------|
-| x | Tensor | 输入 | float16/float32/bfloat16 | 输入 tensor | ND，AutoContiguous |
-| weight | Tensor | 输入 | float16/float32/bfloat16 | PReLU 负半轴斜率 | 1-D，shape 为 `[1]` 或 `[C]` |
-| y | Tensor | 输出 | float16/float32/bfloat16 | 输出 tensor | shape 与 x 一致，AutoContiguous |
+`x`、`weight`、`y` 的 dtype 必须一致。
 
-`x`、`weight`、`y` 的 dtype 必须一致。输出 shape 由 `op_host/prelu_infershape.cpp` 直接继承输入 `x`。
+### Shape 语义
 
-### 1.2 Shape 语义
+- `weightSize == 1`：scalar 模式，所有元素共用 `weight[0]`。
+- `weightSize != 1`：channel 模式，要求 `x` rank >= 2，且 `weightSize == x.shape[1]`。
+- channel 模式按 `[N, C, L]` 解释 contiguous 输入：
+  - `N = x.shape[0]`
+  - `C = x.shape[1]`
+  - `L = prod(x.shape[2:])`
+  - rank 为 2 时 `L = 1`
 
-- `weight` 必须是一维 tensor。
-- `weightSize == 1` 时为 scalar 模式，所有元素共用 `weight[0]`。
-- `weightSize != 1` 时为 channel 模式，要求 `x` rank >= 2，且 `weightSize == x.shape[1]`。
-- channel 模式固定按 `[N, C, L]` 解释 contiguous 输入，其中 `N = x.shape[0]`，`C = x.shape[1]`，`L = prod(x.shape[2:])`；rank 为 2 时 `L = 1`。
-- channel 模式中第 `rowIdx` 个 row 表示一个连续 `(n, c, 0:L)` 段，使用 `weight[rowIdx % C]`。
-
----
-
-## 2. 计算逻辑
-
-### 2.1 数学公式
-
-scalar 模式：
+计算公式：
 
 ```text
-y[i] = x[i] >= 0 ? x[i] : x[i] * weight[0]
+scalar:  y[i]       = x[i]       >= 0 ? x[i]       : x[i]       * weight[0]
+channel: y[n, c, l] = x[n, c, l] >= 0 ? x[n, c, l] : x[n, c, l] * weight[c]
 ```
 
-channel 模式：
-
-```text
-y[n, c, l] = x[n, c, l] >= 0 ? x[n, c, l] : x[n, c, l] * weight[c]
-```
-
-等价 vector 公式：
+等价 vector 形式：
 
 ```text
 y = max(x, 0) + alpha * min(x, 0)
 ```
 
-### 2.2 AscendC API 调用序列
+## 2. TilingData 与 TilingKey
 
-float16/float32 路径直接使用输入 dtype 计算：
-
-```cpp
-LocalTensor<T> xLocal = inputQueueX.DeQue<T>();
-LocalTensor<T> yLocal = outputQueueY.AllocTensor<T>();
-LocalTensor<T> pos = tmpBufPos.Get<T>();
-LocalTensor<T> neg = tmpBufNeg.Get<T>();
-
-Maxs(pos, xLocal, static_cast<T>(0), currentNum);
-Mins(neg, xLocal, static_cast<T>(0), currentNum);
-Muls(neg, neg, weightVal, currentNum);
-Add(yLocal, pos, neg, currentNum);
-```
-
-bfloat16 路径升精度到 float32 计算，再 cast 回 bfloat16：
-
-```cpp
-LocalTensor<bfloat16_t> xLocal = inputQueueX.DeQue<bfloat16_t>();
-LocalTensor<bfloat16_t> yLocal = outputQueueY.AllocTensor<bfloat16_t>();
-LocalTensor<float> xFp32 = tmpXFp32.Get<float>();
-LocalTensor<float> pos = tmpBufPos.Get<float>();
-LocalTensor<float> neg = tmpBufNeg.Get<float>();
-
-Cast(xFp32, xLocal, RoundMode::CAST_NONE, currentNum);
-Maxs(pos, xFp32, 0.0f, currentNum);
-Mins(neg, xFp32, 0.0f, currentNum);
-Muls(neg, neg, weightValFp32, currentNum);
-Add(pos, pos, neg, currentNum);
-Cast(yLocal, pos, RoundMode::CAST_RINT, currentNum);
-```
-
-NC / small-L weight reuse 与 split-C weight reuse 模式使用 weight vector，与 `neg` 做逐元素 `Mul`：
-
-```cpp
-BuildNcWeightVec(tileRows);
-Maxs(pos, xLocal, 0, computeLen);
-Mins(neg, xLocal, 0, computeLen);
-Mul(neg, neg, weightVec, computeLen);
-Add(yLocal, pos, neg, computeLen);
-```
-
-### 2.3 实现路径选择
-
-- [x] AscendC Kernel
-- [ ] CATLASS 模板库
-- [ ] ACLNN 封装
-
-PReLU 是逐元素算子，无矩阵乘、归约或跨元素依赖。channel 模式只改变 alpha 的来源和 tiling 组织方式。
-
----
-
-## 3. Tiling 数据与 TilingKey
-
-### 3.1 TilingData
-
-当前结构体定义在 `op_kernel/prelu_tiling_data.h`：
+`PreluTilingData` 字段：
 
 ```cpp
 struct PreluTilingData {
@@ -131,369 +63,161 @@ struct PreluTilingData {
 };
 ```
 
-字段使用说明：
+TilingKey：
 
-| 字段 | scalar | channel full/split | split-L parallel | NC / small-L weight reuse | NC split-C reuse |
-|------|--------|--------------------|------------------|-----------------|------------------|
-| `formerNum/formerLength/tailLength` | flat core 切分 | 不使用 | 不使用 | 不使用 | 不使用 |
-| `channelSize` | 默认 1 | C | C | C | C |
-| `innerSize` | 默认 1 | L | L | L，参与整行 `[C,L]` 搬运 | 不参与循环 |
-| `innerSizeAligned` | 默认 1 | AlignUp(L, 32B) | AlignUp(L, 32B) | AlignUp(C * L, 32B) | C 分块长度 |
-| `baseRows/extraRows` | 不使用 | 每核 `(n,c)` row 数 | 不使用 | 每核 N row 数 | 不使用 |
-| `tilesPerRow/baseTasks/extraTasks` | 不使用 | split 模式记录每 row tile 数 | task 均衡切分 | 不使用 | 每行 C 分块数和 task 均衡切分 |
+| key | 模式 | 触发条件 | 说明 |
+|-----|------|----------|------|
+| 0 | scalar | `weightSize == 1` | flat elementwise |
+| 1 | channel full-L | channel，且每个 `(n,c)` row 的 L 可放入 UB | 每个 row 一次处理完整 L |
+| 2 | channel split-L | L 超过 UB，且不适合 task 并行 | row 内按 L 分段 |
+| 3 | channel split-L parallel | `N*C` 很小、L 很大 | task 为 `(rowIdx, tileIdx)` |
+| 4 | NC / small-L weight reuse | `L == 1`，或 `L <= 64 && C >= 32` 且整行 `C*L` 可放入 UB | 缓存整条 C 维 weight，按 N row 处理 |
+| 5 | NC / small/medium-L split-C weight reuse | 整行 `C*L` 放不进 UB，但 C 分块可放入 UB | task 为 `(nIdx, cTileIdx)` |
 
-### 3.2 TilingKey
+## 3. Host 侧 Tiling 策略
 
-当前 `op_kernel/prelu_tiling_key.h` 定义 6 个执行模式：
-
-```cpp
-#define PRELU_TPL_SCALAR_MODE 0
-#define PRELU_TPL_CHANNEL_FULL_L_MODE 1
-#define PRELU_TPL_CHANNEL_SPLIT_L_MODE 2
-#define PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE 3
-#define PRELU_TPL_CHANNEL_NC_WEIGHT_REUSE_MODE 4
-#define PRELU_TPL_CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_MODE 5
-```
-
-| tilingKey | 触发条件 | Kernel 路径 |
-|-----------|----------|-------------|
-| `SCALAR_MODE` | `weightSize == 1` | flat elementwise |
-| `CHANNEL_FULL_L_MODE` | channel 模式，且 `AlignUp(L, 32 / sizeof(T)) <= tileLength` | 每个 `(n,c)` row 一次处理完整 L |
-| `CHANNEL_SPLIT_L_MODE` | channel 模式，L 超过 UB，且 row 级并行足够或 task 级并行收益不足 | 每个 `(n,c)` row 内按 L 分段 |
-| `CHANNEL_SPLIT_L_PARALLEL_MODE` | `rowNum * 2 <= coreNum` 且 L 足够大，拆 task 后至少使用 2 倍 row 数的 core | 每个 task 处理一个 `(rowIdx, tileIdx)` |
-| `CHANNEL_NC_WEIGHT_REUSE_MODE` | `L == 1`，或 `L <= 16 && C >= 32` 且 UB 可缓存整条 C 维 weight 并容纳至少一行 `C * L` 计算数据 | 缓存整条 C 维 weight，按 N row 处理 |
-| `CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_MODE` | NC 或 small-L 场景，整行 `C * L` 放不进 UB，但 C 分块可放入 UB | 每个 task 处理一个 `(nIdx, cTileIdx)` |
-
-Kernel 入口通过模板参数 `schMode` 编译期分发，不在主流程中用运行时 `weightMode` 切路径。
-
----
-
-## 4. Host 侧 Tiling
-
-### 4.1 平台与 Workspace
-
-Host 侧从平台获取 AIV 核数和 UB 大小：
+Host 侧获取 AIV 核数和 UB 大小：
 
 ```cpp
-coreNum = ascendcPlatform.GetCoreNumAiv();
-coreNum = std::min(coreNum, MAX_AIV_CORE_NUM); // MAX_AIV_CORE_NUM = 40
-ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
+coreNum = min(GetCoreNumAiv(), 40);
+usableUbSize = ubSize > 1024 ? ubSize - 1024 : ubSize;
 ```
 
-workspace 固定为 0：
+基础 UB 系数：
+
+| dtype | 普通路径 bytes/element | weight reuse bytes/element |
+|-------|-------------------------|-----------------------------|
+| float32 | 24 | 28 |
+| float16 | 12 | 14 |
+| bfloat16 | 20 | 24 |
+
+### Scalar
+
+Scalar 模式按 flat 元素切分，core 起始尽量 512B 对齐：
 
 ```cpp
-constexpr uint32_t WS_SYS_SIZE = 0U;
-currentWorkspace[0] = WS_SYS_SIZE;
+coreAlignElementNum = 512 / sizeof(T);
+blockFactor = AlignUp(CeilDiv(totalNum, coreLimit), coreAlignElementNum);
+usedCoreNum = min(coreLimit, CeilDiv(totalNum, blockFactor));
 ```
 
-### 4.2 Host 校验
+### Channel Full/Split-L
 
-`GetShapeAndDtypeInfo` 完成以下校验：
-
-1. `x/y` rank 和每个维度必须一致。
-2. dtype 仅支持 `DT_FLOAT`、`DT_FLOAT16`、`DT_BF16`。
-3. `x/weight/y` dtype 必须一致。
-4. `weight` 必须是 1-D，且 `weightSize > 0`。
-5. `weightSize != 1` 时，要求 `x` rank >= 2、`N > 0`、`C > 0`、`weightSize == C`。
-6. channel 模式计算 `innerSize = prod(x.shape[2:])`，每个参与乘积的 dim 必须为正，并做 int64 溢出检查。
-7. channel 模式计算 `rowNum = N * C`，并做 int64 溢出检查。
-
-`totalLength` 使用 `inputX->GetOriginShape().GetShapeSize()`。
-
-### 4.3 UB 级 Tiling
-
-普通模式保留 1024B UB：
+普通 channel 路径按 `(n,c)` row 切分：
 
 ```cpp
-constexpr uint64_t UB_RESERVED_SIZE = 1024U;
-uint64_t usableUbSize = (ubSize > UB_RESERVED_SIZE) ? (ubSize - UB_RESERVED_SIZE) : ubSize;
+rowNum = N * C;
+usedCoreNum = min(coreLimit, rowNum);
+baseRows = rowNum / usedCoreNum;
+extraRows = rowNum % usedCoreNum;
+innerSizeAligned = AlignUp(L, 32 / sizeof(T));
 ```
 
-普通模式每元素 UB 系数：
+若 `innerSizeAligned <= tileLength`，走 full-L；否则走 split-L。
 
-| dtype | 系数 | 来源 |
-|-------|------|------|
-| float32 | 24 | input/output double buffer + pos/neg |
-| float16 | 12 | input/output double buffer + pos/neg |
-| bfloat16 | 20 | input/output double buffer + xFp32/pos/neg |
+### NC / Small-L Row Weight Reuse
 
-计算公式：
+该路径用于：
 
-```cpp
-uint64_t blockElementNum = BLOCK_SIZE / typeLength; // 32B 对齐元素数
-uint64_t maxTileElements = usableUbSize / GetBufferBytesPerElement(dataType);
-uint64_t ubFactor = (maxTileElements / blockElementNum) * blockElementNum;
-tiling->tileLength = static_cast<int64_t>(ubFactor);
-```
-
-NC / small-L weight reuse 模式使用更大的 per-element 系数，并额外预留 weight cache：
-
-| dtype | NC 系数 | 额外缓存 |
-|-------|---------|----------|
-| float32 | 28 | `AlignUp(C, 32B) * 4` |
-| float16 | 14 | `AlignUp(C, 32B) * 2` |
-| bfloat16 | 24 | `AlignUp(C, 32B) * 2 + AlignUp(C, 32B) * 4` |
-
-### 4.4 scalar 模式 Block Tiling
-
-scalar 模式按 flat 元素切分：
-
-```cpp
-uint64_t coreAlignElementNum = CORE_ALIGN_SIZE / typeLength; // 512B 对齐元素数
-uint64_t totalCoreElements = CeilDiv(totalNum, coreLimit);
-uint64_t blockFactor = CeilDiv(totalCoreElements, coreAlignElementNum) * coreAlignElementNum;
-uint64_t finalCoreNum = CeilDiv(totalNum, blockFactor);
-finalCoreNum = std::min(coreLimit, finalCoreNum);
-
-formerNum = finalCoreNum - 1;
-formerLength = blockFactor;
-tailLength = totalNum - formerNum * blockFactor;
-```
-
-Kernel 中 `InitScalar` 根据 `blockIdx` 计算当前 core 的 `blockOffset/blockLength`，并在 Init 阶段读取一次 `weight[0]`。
-
-### 4.5 channel full-L 与 split-L
-
-channel 常规路径按 `(n,c)` row 均衡切分：
-
-```cpp
-finalCoreNum = std::min(coreLimit, rowNum);
-baseRows = rowNum / finalCoreNum;
-extraRows = rowNum % finalCoreNum;
-```
-
-`innerSizeAligned = AlignUp(L, 32 / sizeof(T))`。若 `innerSizeAligned <= tileLength`，选择 full-L；否则选择 split-L，并记录：
-
-```cpp
-tilesPerRow = CeilDiv(innerSize, tileLength);
-```
-
-full-L 一次处理完整 L，split-L 在每个 row 内按 `tileLength` 分段。
-
-### 4.6 split-L parallel
-
-当 row 数明显小于 core 数，并且 L 足够大时，Host 尝试 task 级并行：
-
-```cpp
-if (rowNum * 2 <= coreLimit && innerSize >= 2 * (CORE_ALIGN_SIZE / typeLength)) {
-    targetTilesPerRow = CeilDiv(coreLimit, rowNum);
-    parallelTileLength = AlignUp(CeilDiv(innerSize, targetTilesPerRow), CORE_ALIGN_SIZE / typeLength);
-    parallelTileLength = min(parallelTileLength, ubFactor);
-    tilesPerRow = CeilDiv(innerSize, parallelTileLength);
-    totalTaskNum = rowNum * tilesPerRow;
-    finalCoreNum = min(coreLimit, totalTaskNum);
-}
-```
-
-只有 `finalCoreNum >= min(coreLimit, rowNum * 2)` 时才进入 parallel 模式。该模式写入：
-
-- `tileLength = parallelTileLength`
-- `tilesPerRow`
-- `baseTasks = totalTaskNum / finalCoreNum`
-- `extraTasks = totalTaskNum % finalCoreNum`
-
-### 4.7 NC / small-L weight reuse 与 split-C reuse
-
-该模式优化 NC 类 channel 场景以及大 C、小 L 场景。NC 场景即 `L == 1`，不仅包含 rank=2 的 `[N, C]`，也包含 `[N, C, 1]`、`[N, C, 1, 1]` 以及更高 rank 但 `prod(x.shape[2:]) == 1` 的形状；Host 侧统一将这些形状视为 `[N, C]` 处理。大 C、小 L 场景指 `L <= 16 && C >= 32`，且整行 `C * L` 能放入 UB。
-
-进入 weight reuse 不再要求 `N >= coreLimit`，也不使用固定 `C <= 256` 作为硬门槛。只要 UB 能容纳对齐后的 weight cache 和至少一行计算数据，即优先使用 weight reuse 路径。这样小 N 的 NC 场景可以按整行 `[C]` 向量化计算；大 C、小 L 场景可以按整行 `[C,L]` 搬运和计算，避免 full-L 路径把每个 `(n,c)` 小 row 拆开处理。
-
-当 C 较大导致整行 `C * L` 放不进 UB，但某个 C 分块可以放入 UB 时，进入 split-C weight reuse。该路径按 C 维分块缓存 weight，每个 task 处理一个 `(nIdx, cTileIdx)`，保留连续搬运和 vector `Mul`，避免退回普通 full-L 的小 row 调度。
-
-触发条件：
-
-- `innerSize == 1`，或 `innerSize <= 16 && channelSize >= 32`
-- `channelSize > 1`
-- `batchSize = rowNum / channelSize > 0`
-- UB 可以容纳对齐后的整条 C 维 weight cache 和至少一行 `[C,L]` 计算数据
+- `L == 1`
+- 或 `L <= 64 && C >= 32`，且整行 `C * L` 可放入 UB
 
 Host 计算：
 
 ```cpp
-rowElements = channelSize * innerSize;
-alignedRowElements = AlignUp(rowElements, 32 / typeLength);
-alignedChannelSize = AlignUp(channelSize, 32 / typeLength);
-weightCacheBytes = alignedChannelSize * typeLength;
-if (dataType == DT_BF16) {
+rowElements = C * L;
+alignedRowElements = AlignUp(rowElements, 32 / sizeof(T));
+alignedChannelSize = AlignUp(C, 32 / sizeof(T));
+weightCacheBytes = alignedChannelSize * sizeof(T);
+if (dtype == bfloat16) {
     weightCacheBytes += alignedChannelSize * sizeof(float);
 }
+
 ncMaxTileElements =
-    ((usableUbSize - weightCacheBytes) / GetNcWeightReuseBufferBytesPerElement(dataType) /
-     alignedRowElements) *
+    ((usableUbSize - weightCacheBytes) / weightReuseBytesPerElement / alignedRowElements) *
     alignedRowElements;
 ```
 
-若整行 `[C,L]` 可行，则：
-
-- `innerSizeAligned = alignedRowElements`
-- `tileLength = ncMaxTileElements`
-- `usedCoreNum = min(coreLimit, batchSize)`
-- `baseRows/extraRows` 按 N row 分配
-
-当 `batchSize < coreLimit` 时，该分支只启动 `batchSize` 个 core；这是有意的。该模式中每个 core 处理一行或多行连续 `C * L` 数据，并复用 UB 中的 weight vector。相比 full-L 模式按 `(n,c)` row 调度，weight reuse 更适合小 L 场景的向量化和减少 weight GM 访问。
-
-当整行 `C * L` 放不下时，继续尝试 split-C。`L == 1` 时按 C 元素估算：
+若 `ncMaxTileElements >= alignedRowElements`，则：
 
 ```cpp
-splitCBytesPerElement = weightCacheBytesPerElement + GetNcWeightReuseBufferBytesPerElement(dataType);
-maxSplitCElements = usableUbSize / splitCBytesPerElement;
-splitCTileLength = AlignDown(maxSplitCElements, 32 / sizeof(T));
-cTileNum = CeilDiv(C, splitCTileLength);
-totalTaskNum = N * cTileNum;
-usedCoreNum = min(coreLimit, totalTaskNum);
+tileLength = ncMaxTileElements;
+innerSizeAligned = alignedRowElements;
+usedCoreNum = min(coreLimit, N);
+baseRows = N / usedCoreNum;
+extraRows = N % usedCoreNum;
 ```
 
-若 `splitCTileLength >= 32 / sizeof(T)`，则进入 `CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_MODE`，写入：
+该路径避免 full-L 把大 C、小 L 输入拆成大量 `(n,c)` 小 row。
 
-- `tileLength = splitCTileLength`
-- `innerSizeAligned = splitCTileLength`
-- `tilesPerRow = cTileNum`
-- `baseTasks = totalTaskNum / usedCoreNum`
-- `extraTasks = totalTaskNum % usedCoreNum`
+### NC / Small-Medium-L Split-C Weight Reuse
 
-若连一个 C 分块都无法放入 UB，再回退到普通 channel full-L 路径。实际实现可保留一个非常宽松的保护上限用于防止异常 shape，但该上限不应替代 UB 容量判断。
+当 `L <= 64 && C >= 32`，但整行 `C * L` 放不进 UB 时，尝试按 C 分块。
 
-`L > 1` 时按 C channel 估算分块大小：
+`L == 1` 时按元素估算：
 
 ```cpp
-splitCBytesPerChannel =
-    weightCacheBytesPerElement +
-    GetNcWeightReuseBufferBytesPerElement(dataType) * innerSize;
+splitCBytesPerElement = weightCacheBytesPerElement + weightReuseBytesPerElement;
+splitCTileLength = AlignDown(usableUbSize / splitCBytesPerElement, 32 / sizeof(T));
+```
+
+`L > 1` 时按 channel 估算：
+
+```cpp
+splitCBytesPerChannel = weightCacheBytesPerElement + weightReuseBytesPerElement * L;
 splitCTileChannels = AlignDown(usableUbSize / splitCBytesPerChannel, 32 / sizeof(T));
-alignedSplitCElements = AlignUp(splitCTileChannels * innerSize, 32 / sizeof(T));
+alignedSplitCElements = AlignUp(splitCTileChannels * L, 32 / sizeof(T));
 cTileNum = CeilDiv(C, splitCTileChannels);
 totalTaskNum = N * cTileNum;
 usedCoreNum = min(coreLimit, totalTaskNum);
 ```
 
-该分支写入：
-
-- `tileLength = splitCTileChannels`，表示每个 C tile 的 channel 数
-- `innerSizeAligned = alignedSplitCElements`，表示每个 C tile 的计算元素数
-- `tilesPerRow = cTileNum`
-- `baseTasks = totalTaskNum / usedCoreNum`
-- `extraTasks = totalTaskNum % usedCoreNum`
-
-例如 `[1, 2048, 7]` 在 256KB UB、float32 下整行 `2048 * 7` 放不进整行 weight reuse，但可按 C 分成 2 个 task，`usedCoreNum=2`，避免 full-L 路径按 `N*C=2048` 个小 row 分到 40 个核。
-
----
-
-## 5. Kernel 端实现要点
-
-### 5.1 Kernel 入口
-
-`op_kernel/prelu.cpp` 使用模板 `schMode` 分发：
+写入 tiling：
 
 ```cpp
-if constexpr (schMode == PRELU_TPL_CHANNEL_FULL_L_MODE) {
-    op.InitChannel(...);
-    op.ProcessChannelFullL();
-} else if constexpr (schMode == PRELU_TPL_CHANNEL_NC_WEIGHT_REUSE_MODE) {
-    op.InitChannelNcWeightReuse(...);
-    op.ProcessChannelNcWeightReuse();
-} else if constexpr (schMode == PRELU_TPL_CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_MODE) {
-    op.InitChannelNcSplitCWeightReuse(...);
-    op.ProcessChannelNcSplitCWeightReuse();
-} else if constexpr (schMode == PRELU_TPL_CHANNEL_SPLIT_L_MODE) {
-    op.InitChannel(...);
-    op.ProcessChannelSplitL();
-} else if constexpr (schMode == PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE) {
-    op.InitChannelSplitLParallel(...);
-    op.ProcessChannelSplitLParallel();
-} else {
-    op.InitScalar(...);
-    op.ProcessScalar();
-}
+tileLength = splitCTileChannels;          // L > 1 时表示每个 C tile 的 channel 数
+innerSizeAligned = alignedSplitCElements; // L > 1 时表示每个 C tile 的计算元素数
+tilesPerRow = cTileNum;
+baseTasks = totalTaskNum / usedCoreNum;
+extraTasks = totalTaskNum % usedCoreNum;
 ```
 
-### 5.2 scalar 流程
+示例：
+
+- `[1, 2048, 7]`，float32，256KB UB：`splitCTileChannels=1304`，`tilesPerRow=2`，`usedCoreNum=2`
+- `[1, 2048, 7, 7]`，即 `L=49`：`splitCTileChannels=184`，`tilesPerRow=12`，`usedCoreNum=12`
+
+这比 full-L 的 `N*C=2048` 个小 row 分到 40 个核更适合该场景。
+
+## 4. Kernel 端实现
+
+### Scalar / Channel 常规计算
+
+float16/float32 使用原 dtype 计算：
 
 ```cpp
-for (int64_t i = 0; i < tileNum; ++i) {
-    currentNum = (i == tileNum - 1) ? (blockLength - i * ubLength) : ubLength;
-    CopyIn(i, currentNum);
-    Compute(currentNum);
-    CopyOut(i, currentNum);
-}
+Maxs(pos, xLocal, 0, len);
+Mins(neg, xLocal, 0, len);
+Muls(neg, neg, weightVal, len);
+Add(yLocal, pos, neg, len);
 ```
 
-scalar 模式使用 `formerNum/formerLength/tailLength` 做 flat block 切分。bfloat16 scalar weight 通过 `LoadBf16ScalarAsFloat` 读取为 float，避免依赖 bfloat16 标量 Cast 重载。
-
-### 5.3 channel full-L
-
-每个 core 处理若干 `(n,c)` row。每个 row 读取一次 `weight[c]`：
+bfloat16 升精度到 float32：
 
 ```cpp
-for (rowProgress = 0; rowProgress < blockRowNum; ++rowProgress) {
-    rowIdx = rowOffset + rowProgress;
-    channelIdx = rowIdx % channelSize;
-    gmOffset = rowIdx * innerSize;
-    LoadChannelWeight(channelIdx);
-    CopyInByOffset(gmOffset, realLen, computeLen);
-    Compute(computeLen);
-    CopyOutByOffset(gmOffset, realLen);
-}
+Cast(xFp32, xLocal, CAST_NONE, len);
+Maxs(pos, xFp32, 0.0f, len);
+Mins(neg, xFp32, 0.0f, len);
+Muls(neg, neg, weightValFp32, len);
+Add(pos, pos, neg, len);
+Cast(yLocal, pos, CAST_RINT, len);
 ```
 
-`realLen = innerSize`，`computeLen = innerSizeAligned`。非 32B 对齐尾部通过 `DataCopyPad` 补零，CopyOut 只写真实 L。
+### Row Weight Reuse
 
-### 5.4 channel split-L
+Init 阶段把 `weight[0:C]` 搬到 UB。`L == 1` 时，直接把 cached weight 复制到每个 N row 的 `weightVec`。
 
-split-L 仍按 row 分 core，row 内分段：
-
-```cpp
-for each row:
-    LoadChannelWeight(rowIdx % C);
-    for (tileOffset = 0; tileOffset < innerSize; tileOffset += ubLength) {
-        realLen = min(ubLength, innerSize - tileOffset);
-        computeLen = AlignUp(realLen, 32 / sizeof(T));
-        gmOffset = rowIdx * innerSize + tileOffset;
-        CopyInByOffset(gmOffset, realLen, computeLen);
-        Compute(computeLen);
-        CopyOutByOffset(gmOffset, realLen);
-    }
-```
-
-同一个 row 的所有 L 分段复用同一个 `weight[c]`。
-
-### 5.5 channel split-L parallel
-
-parallel 模式按 task 切分，每个 task 对应 `(rowIdx, tileIdx)`：
-
-```cpp
-taskIdx = taskOffset + taskProgress;
-rowIdx = taskIdx / tilesPerRow;
-tileIdx = taskIdx % tilesPerRow;
-tileOffset = tileIdx * ubLength;
-channelIdx = rowIdx % channelSize;
-gmOffset = rowIdx * innerSize + tileOffset;
-```
-
-同一 core 连续 task 若属于同一 channel，则通过 `lastChannelIdx` 跳过重复 `LoadChannelWeight`。
-
-### 5.6 NC / small-L weight reuse
-
-NC / small-L weight reuse 模式面向 `L == 1` 的 NC 类输入，以及 `L <= 16 && C >= 32` 且整行 `C * L` 可放入 UB 的大 C、小 L 输入。Init 阶段一次性把 `weight[0:C]` 复制到 UB，并按 32B 对齐；bfloat16 还会额外转换出 float weight cache。
-
-处理流程：
-
-```cpp
-for (rowProgress = 0; rowProgress < blockRowNum; rowProgress += rowsPerTile) {
-    tileRows = min(rowsPerTile, blockRowNum - rowProgress);
-    computeLen = tileRows * alignedChannelSize;
-    nOffset = rowOffset + rowProgress;
-
-    CopyInNcByRows(nOffset, tileRows);
-    BuildNcWeightVec(tileRows);
-    ComputeNc(computeLen);
-    CopyOutNcByRows(nOffset, tileRows);
-}
-```
-
-该模式把一行 `[C]` 或 `[C,L]` 的 weight 扩展为 `tileRows * alignedChannelSize` 的 `weightVec`，使用逐元素 `Mul` 替代每个 channel 的 scalar `Muls`，减少重复 GM 读取 weight。
-
-`L == 1` 时，`BuildNcWeightVec` 对每个 N row 直接把缓存的 weight 通过 UB 内 `DataCopy` 复制到对应 row。`L > 1` 时，先只在第一行构造 `C * L` 的 weight pattern：
+`L > 1` 时，先构造第一行 `C * L` weight pattern：
 
 ```cpp
 for (channelIdx = 0; channelIdx < C; ++channelIdx) {
@@ -504,19 +228,15 @@ for (channelIdx = 0; channelIdx < C; ++channelIdx) {
 }
 ```
 
-随后通过 UB 内 `DataCopy` 将第一行 pattern 复制到后续 N row，避免 `tileRows * C * L` 次逐元素 `SetValue`。该优化将 scalar 展开开销降低为 `C * L` 次逐元素写入加 `tileRows - 1` 次 UB 内连续拷贝。
+然后用 UB 内 `DataCopy` 把第一行 pattern 复制到后续 N row，避免 `tileRows * C * L` 次逐元素 `SetValue`。
 
-### 5.7 NC split-C weight reuse
+### Split-C Weight Reuse
 
-split-C 模式面向 `L == 1` 且 C 较大的 NC 类输入，以及 `L <= 16 && C >= 32` 但整行 `C * L` 放不进 UB 的 small-L 输入。Init 阶段不缓存整条 C 维 weight，而是按 task 动态缓存当前 C 分块。
-
-每个 task 解码为一个 `(nIdx, cTileIdx)`：
+每个 task 处理一个 `(nIdx, cTileIdx)`：
 
 ```cpp
-taskIdx = taskOffset + taskProgress;
-nIdx = taskIdx / tilesPerRow;
-cTileIdx = taskIdx % tilesPerRow;
-cOffset = cTileIdx * alignedChannelSize;
+cTileChannels = (L == 1) ? alignedChannelSize : tileLength;
+cOffset = cTileIdx * cTileChannels;
 realC = min(cTileChannels, C - cOffset);
 realLen = realC * L;
 computeLen = AlignUp(realLen, 32 / sizeof(T));
@@ -533,89 +253,34 @@ ComputeNc(computeLen);
 CopyOutByOffset(gmOffset, realLen);
 ```
 
-最后一个 C 分块可能不足 `cTileChannels`，通过 `DataCopyPad` 补齐计算，CopyOut 只写回真实 `realLen`。该路径比普通 full-L 对大 C、小 L 场景更友好，因为单次搬运和计算粒度是 C 分块内的连续 `Ctile * L`，而不是单个 `(n,c)` 小 row。
+最后一个 C 分块可能不足 `cTileChannels`，用 `DataCopyPad` 补齐计算，CopyOut 只写真实 `realLen`。
 
----
+## 5. 测试覆盖
 
-## 6. Workspace 需求
+Host tiling UT 覆盖：
 
-当前实现 workspace size 为 0。kernel 所需临时空间均来自 UB：
+- scalar：`[7]`
+- channel full-L：`[2,3,5]`
+- NC row weight reuse：`[64,3]`
+- small-L row weight reuse：`[8,128,4]`
+- small-L split-C weight reuse：`[1,2048,7]`
+- medium-L split-C weight reuse：`[1,2048,7,7]`
+- NC split-C weight reuse：`[1,70000]`
+- channel split-L / split-L parallel：大 L case
 
-- input/output double buffer
-- scalar/channel 临时 `pos/neg`
-- bfloat16 的 `tmpXFp32`
-- NC / small-L weight reuse 的 `weightBuf/weightVecBuf/weightFp32Buf`
-- NC split-C reuse 复用 `weightBuf/weightVecBuf/weightFp32Buf`，但 weight 按 C 分块动态搬入
+Kernel UT 覆盖：
 
----
+- scalar
+- channel full-L
+- NC row weight reuse
+- small-L row weight reuse
+- NC split-C weight reuse
+- small-L split-C weight reuse
+- split-L / split-L parallel
 
-## 7. 性能与约束
+## 6. 当前限制
 
-### 7.1 性能特征
-
-- 算子整体为 memory-bound elementwise。
-- scalar 模式 flat 切分，适合任意 ND 输入。
-- channel full-L 避免 row 内循环，适合 L 可放入 UB 的场景。
-- channel split-L 支持大 L，不要求完整 L 放入 UB。
-- channel split-L parallel 通过拆分 L 维 task 提升 `N*C` 较小、L 很大时的 AIV 利用率。
-- NC / small-L weight reuse 针对 `L == 1` 的 NC 类场景，以及 `L <= 16 && C >= 32` 且整行 `C * L` 可放入 UB 的大 C、小 L 场景，把 weight 缓存在 UB，减少重复读取并使用 vector `Mul`。
-- NC / small-L split-C reuse 针对 C 较大、整行 `C * L` 放不进 UB 的场景，按 C 分块缓存 weight，避免退回小 row full-L。
-- float16/float32 直接按原 dtype vector 计算；bfloat16 升到 float32 计算。
-
-### 7.2 当前限制
-
-- 仅注册 `ascend910b` 配置。
-- `weight` 必须是一维 tensor，不支持 0-D scalar。
-- channel broadcast 固定使用第 1 维 C，不支持按其他维度 broadcast。
+- channel broadcast 固定使用第 1 维 C。
 - `x/weight/y` dtype 必须一致。
-- NC / small-L weight reuse 在 `L == 1`，或 `L <= 16 && C >= 32` 且 UB 能容纳整条 C 维 weight 与至少一行 `C * L` 计算数据时启用；不再以 `N >= coreLimit` 或固定 `C <= 256` 作为硬条件。
-- NC / small-L split-C reuse 在整行 `C * L` 放不进 UB、但 C 分块可放入 UB 时启用。
-
----
-
-## 8. 测试覆盖
-
-当前 `prelu_chanel/tests/ut/op_host/test_prelu_tiling.cpp` 覆盖：
-
-- scalar：`x=[7], weight=[1]`
-- `N=1,C=1,weight=[1]` 仍走 scalar
-- channel full-L：`x=[2,3,5], weight=[3]`
-- NC weight reuse：`x=[64,3], weight=[3]`
-- small-L weight reuse：`x=[8,128,4], weight=[128]`
-- small-L split-C weight reuse：`x=[1,2048,7], weight=[2048]`
-- channel split-L：`x=[64,2,20000], weight=[2]`
-- split-L 收益不足 fallback：`x=[16,2,20000], weight=[2]`
-- split-L parallel：`x=[1,2,20000], weight=[2]`
-
-当前 `prelu_chanel/tests/ut/op_kernel/test_prelu.cpp` 覆盖：
-
-- scalar kernel
-- channel full-L kernel
-- channel NC weight reuse kernel
-- channel small-L weight reuse kernel
-- channel NC split-C weight reuse kernel
-- channel small-L split-C weight reuse kernel
-- channel split-L kernel
-- channel split-L parallel kernel
-
-建议同步到 `ascend-kernel` 后补充：
-
-- float16、bfloat16、float32 三种 dtype 的端到端精度用例。
-- 非法参数：weight rank 非 1、weight size 与 C 不一致、dtype 不一致、channel rank < 2。
-- NC / small-L weight reuse 的边界：`C=256/257/1024/4096`，NC 场景超过 UB 可容纳整行时进入 split-C。
-- split-C 边界：大 C case 验证 tilingKey 为 `CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_MODE`，并覆盖最后一个 C 分块非对齐。
-- 小 N 的 NC 类场景，例如 `[1, 3]`、`[2, 64]`、`[1, 1024, 1, 1]`，确认仍进入 NC weight reuse 分支。
-- 等价 shape：`[N, C]`、`[N, C, 1]`、`[N, C, 1, 1]` 的 tilingKey 和计算结果一致。
-- 大 C、小 L 场景，例如 `[8,128,2]`、`[8,128,4]`、`[4,1024,8]`，确认整行可放入 UB 时进入 weight reuse，整行放不下但 C 分块可放入 UB 时进入 split-C weight reuse。
-
----
-
-## 9. 参考文件
-
-- `/Users/hc/ascendc/prelu_chanel/op_host/prelu_def.cpp`
-- `/Users/hc/ascendc/prelu_chanel/op_host/prelu_infershape.cpp`
-- `/Users/hc/ascendc/prelu_chanel/op_host/prelu_tiling.cpp`
-- `/Users/hc/ascendc/prelu_chanel/op_kernel/prelu_tiling_data.h`
-- `/Users/hc/ascendc/prelu_chanel/op_kernel/prelu_tiling_key.h`
-- `/Users/hc/ascendc/prelu_chanel/op_kernel/prelu.cpp`
-- `/Users/hc/ascendc/prelu_chanel/op_kernel/prelu.h`
+- split-C-with-L 当前只在 `L <= 64 && C >= 32` 范围启用。
+- 若 C 分块仍无法放入 UB，则回退到常规 channel full/split 路径。

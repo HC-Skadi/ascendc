@@ -23,6 +23,7 @@ constexpr int64_t MAX_AIV_CORE_NUM = 40;
 constexpr uint64_t MIN_PARALLEL_TILE_NUM = 2U;
 constexpr uint64_t UB_RESERVED_SIZE = 1024U;
 constexpr uint64_t SMALL_L_WEIGHT_REUSE_MAX_INNER_SIZE = 16U;
+constexpr uint64_t SPLIT_C_WEIGHT_REUSE_MAX_INNER_SIZE = 64U;
 constexpr uint64_t LARGE_C_WEIGHT_REUSE_MIN_CHANNEL_SIZE = 32U;
 
 static ge::graphStatus GetPlatformInfo(gert::TilingContext* context, uint64_t& ubSize, int64_t& coreNum)
@@ -262,7 +263,7 @@ static ge::graphStatus CalcTiling(
     uint64_t batchSize = rowNumU64 / static_cast<uint64_t>(channelSize);
     bool preferWeightReuseByRow =
         innerSize == 1 ||
-        (static_cast<uint64_t>(innerSize) <= SMALL_L_WEIGHT_REUSE_MAX_INNER_SIZE &&
+        (static_cast<uint64_t>(innerSize) <= SPLIT_C_WEIGHT_REUSE_MAX_INNER_SIZE &&
          static_cast<uint64_t>(channelSize) >= LARGE_C_WEIGHT_REUSE_MIN_CHANNEL_SIZE);
     if (preferWeightReuseByRow && channelSize > 1 && batchSize > 0) {
         OP_CHECK_IF(
