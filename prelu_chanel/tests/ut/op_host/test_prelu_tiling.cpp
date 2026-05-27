@@ -41,10 +41,10 @@ static PreluTestParam testCases[] = {
         "30 6 0 0 0 10880 3 5 8 1 0 0 0 0 ", {0}, 64, 262144, 4096},
     {"prelu_channel_split", {64, 2, 20000}, ge::DT_FLOAT, ge::FORMAT_ND, {2}, ge::DT_FLOAT, ge::FORMAT_ND,
         {64, 2, 20000}, ge::DT_FLOAT, ge::FORMAT_ND, "Ascend910B", ge::GRAPH_SUCCESS, 2UL,
-        "2560000 64 0 0 0 10880 2 20000 20000 2 0 2 0 0 ", {0}, 64, 262144, 4096},
+        "2560000 40 0 0 0 10880 2 20000 20000 3 8 2 0 0 ", {0}, 64, 262144, 4096},
     {"prelu_channel_split_parallel", {1, 2, 20000}, ge::DT_FLOAT, ge::FORMAT_ND, {2}, ge::DT_FLOAT,
         ge::FORMAT_ND, {1, 2, 20000}, ge::DT_FLOAT, ge::FORMAT_ND, "Ascend910B", ge::GRAPH_SUCCESS, 3UL,
-        "40000 4 0 0 0 10880 2 20000 20000 0 0 2 1 0 ", {0}, 64, 262144, 4096},
+        "40000 40 0 0 0 1024 2 20000 20000 0 0 20 1 0 ", {0}, 64, 262144, 4096},
 };
 
 class PreluTilingTest : public testing::TestWithParam<PreluTestParam> {
