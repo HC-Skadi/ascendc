@@ -21,7 +21,6 @@ constexpr uint32_t BLOCK_SIZE = 32U;
 constexpr uint32_t CORE_ALIGN_SIZE = 512U;
 constexpr int64_t MAX_AIV_CORE_NUM = 40;
 constexpr uint64_t MIN_PARALLEL_TILE_NUM = 2U;
-constexpr int64_t NC_WEIGHT_REUSE_MAX_CHANNEL_SIZE = 256;
 constexpr uint64_t UB_RESERVED_SIZE = 1024U;
 
 static ge::graphStatus GetPlatformInfo(gert::TilingContext* context, uint64_t& ubSize, int64_t& coreNum)
@@ -248,31 +247,35 @@ static ge::graphStatus CalcTiling(
     tiling->innerSizeAligned = static_cast<int64_t>(innerSizeAligned);
 
     uint64_t batchSize = rowNumU64 / static_cast<uint64_t>(channelSize);
-    if (innerSize == 1 && channelSize > 1 && channelSize <= NC_WEIGHT_REUSE_MAX_CHANNEL_SIZE &&
-        batchSize >= coreLimit) {
+    if (innerSize == 1 && channelSize > 1 && batchSize > 0) {
         uint64_t alignedChannelSize = AlignUp(static_cast<uint64_t>(channelSize), blockElementNum);
-        uint64_t weightCacheBytes = alignedChannelSize * typeLength;
-        if (dataType == ge::DT_BF16) {
-            weightCacheBytes += alignedChannelSize * sizeof(float);
+        bool weightCacheSizeValid =
+            alignedChannelSize <= std::numeric_limits<uint64_t>::max() / static_cast<uint64_t>(typeLength);
+        uint64_t weightCacheBytes = weightCacheSizeValid ? alignedChannelSize * typeLength : 0U;
+        if (weightCacheSizeValid && dataType == ge::DT_BF16) {
+            weightCacheSizeValid =
+                alignedChannelSize <=
+                (std::numeric_limits<uint64_t>::max() - weightCacheBytes) / static_cast<uint64_t>(sizeof(float));
+            if (weightCacheSizeValid) {
+                weightCacheBytes += alignedChannelSize * sizeof(float);
+            }
         }
-        OP_CHECK_IF(
-            weightCacheBytes >= usableUbSize,
-            OP_LOGE(context, "Prelu: UB is too small for NC weight reuse cache"),
-            return ge::GRAPH_FAILED);
-        uint64_t ncMaxTileElements =
-            ((usableUbSize - weightCacheBytes) / GetNcWeightReuseBufferBytesPerElement(dataType) /
-             alignedChannelSize) *
-            alignedChannelSize;
-        if (ncMaxTileElements >= alignedChannelSize) {
-            uint64_t finalCoreNum = std::min(coreLimit, batchSize);
-            tiling->tileLength = static_cast<int64_t>(ncMaxTileElements);
-            tiling->innerSizeAligned = static_cast<int64_t>(alignedChannelSize);
-            tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
-            tiling->baseRows = static_cast<int64_t>(batchSize / finalCoreNum);
-            tiling->extraRows = static_cast<int64_t>(batchSize % finalCoreNum);
-            usedCoreNum = static_cast<uint32_t>(finalCoreNum);
-            useNcWeightReuse = true;
-            return ge::GRAPH_SUCCESS;
+        if (weightCacheSizeValid && weightCacheBytes < usableUbSize) {
+            uint64_t ncMaxTileElements =
+                ((usableUbSize - weightCacheBytes) / GetNcWeightReuseBufferBytesPerElement(dataType) /
+                 alignedChannelSize) *
+                alignedChannelSize;
+            if (ncMaxTileElements >= alignedChannelSize) {
+                uint64_t finalCoreNum = std::min(coreLimit, batchSize);
+                tiling->tileLength = static_cast<int64_t>(ncMaxTileElements);
+                tiling->innerSizeAligned = static_cast<int64_t>(alignedChannelSize);
+                tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
+                tiling->baseRows = static_cast<int64_t>(batchSize / finalCoreNum);
+                tiling->extraRows = static_cast<int64_t>(batchSize % finalCoreNum);
+                usedCoreNum = static_cast<uint32_t>(finalCoreNum);
+                useNcWeightReuse = true;
+                return ge::GRAPH_SUCCESS;
+            }
         }
     }
 
