@@ -128,8 +128,7 @@ __aicore__ inline void Prelu<T>::InitScalar(
     outputGMY.SetGlobalBuffer((__gm__ T*)y + blockOffset, blockLength);
 
     if constexpr (std::is_same_v<T, bfloat16_t>) {
-        T scalarWeight = *((__gm__ T*)weight);
-        weightValFp32 = AscendC::Cast(scalarWeight);
+        weightValFp32 = LoadBf16ScalarAsFloat(weight);
     } else {
         T scalarWeight = *((__gm__ T*)weight);
         weightVal = scalarWeight;
@@ -233,8 +232,7 @@ template <typename T>
 __aicore__ inline void Prelu<T>::LoadChannelWeight(int64_t channelIdx)
 {
     if constexpr (std::is_same_v<T, bfloat16_t>) {
-        T scalarWeight = *((__gm__ T*)weightGM + channelIdx);
-        weightValFp32 = AscendC::Cast(scalarWeight);
+        weightValFp32 = LoadBf16ScalarAsFloat((GM_ADDR)((__gm__ T*)weightGM + channelIdx));
     } else {
         weightVal = *((__gm__ T*)weightGM + channelIdx);
     }
