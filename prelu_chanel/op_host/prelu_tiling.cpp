@@ -166,6 +166,15 @@ static uint64_t GetNcWeightReuseBufferBytesPerElement(ge::DataType dataType)
     return 24U;
 }
 
+static uint64_t GetNcWeightCacheBytesPerElement(ge::DataType dataType, uint32_t typeLength)
+{
+    uint64_t bytes = typeLength;
+    if (dataType == ge::DT_BF16) {
+        bytes += sizeof(float);
+    }
+    return bytes;
+}
+
 static uint64_t CeilDiv(uint64_t value, uint64_t factor)
 {
     return (value + factor - 1U) / factor;
@@ -179,10 +188,12 @@ static uint64_t AlignUp(uint64_t value, uint64_t align)
 static ge::graphStatus CalcTiling(
     gert::TilingContext* context, uint64_t ubSize, int64_t coreNum, int64_t totalNum, ge::DataType dataType,
     uint32_t typeLength, int64_t weightMode, int64_t channelSize, int64_t innerSize, int64_t rowNum,
-    PreluTilingData* tiling, uint32_t& usedCoreNum, bool& useSplitLParallel, bool& useNcWeightReuse)
+    PreluTilingData* tiling, uint32_t& usedCoreNum, bool& useSplitLParallel, bool& useNcWeightReuse,
+    bool& useNcSplitCWeightReuse)
 {
     useSplitLParallel = false;
     useNcWeightReuse = false;
+    useNcSplitCWeightReuse = false;
     uint64_t bufferBytesPerElement = GetBufferBytesPerElement(dataType);
     uint64_t usableUbSize = (ubSize > UB_RESERVED_SIZE) ? (ubSize - UB_RESERVED_SIZE) : ubSize;
     uint64_t blockElementNum = BLOCK_SIZE / typeLength;
@@ -249,17 +260,10 @@ static ge::graphStatus CalcTiling(
     uint64_t batchSize = rowNumU64 / static_cast<uint64_t>(channelSize);
     if (innerSize == 1 && channelSize > 1 && batchSize > 0) {
         uint64_t alignedChannelSize = AlignUp(static_cast<uint64_t>(channelSize), blockElementNum);
-        bool weightCacheSizeValid =
-            alignedChannelSize <= std::numeric_limits<uint64_t>::max() / static_cast<uint64_t>(typeLength);
-        uint64_t weightCacheBytes = weightCacheSizeValid ? alignedChannelSize * typeLength : 0U;
-        if (weightCacheSizeValid && dataType == ge::DT_BF16) {
-            weightCacheSizeValid =
-                alignedChannelSize <=
-                (std::numeric_limits<uint64_t>::max() - weightCacheBytes) / static_cast<uint64_t>(sizeof(float));
-            if (weightCacheSizeValid) {
-                weightCacheBytes += alignedChannelSize * sizeof(float);
-            }
-        }
+        uint64_t weightCacheBytesPerElement = GetNcWeightCacheBytesPerElement(dataType, typeLength);
+        bool weightCacheSizeValid = alignedChannelSize <=
+            std::numeric_limits<uint64_t>::max() / weightCacheBytesPerElement;
+        uint64_t weightCacheBytes = weightCacheSizeValid ? alignedChannelSize * weightCacheBytesPerElement : 0U;
         if (weightCacheSizeValid && weightCacheBytes < usableUbSize) {
             uint64_t ncMaxTileElements =
                 ((usableUbSize - weightCacheBytes) / GetNcWeightReuseBufferBytesPerElement(dataType) /
@@ -276,6 +280,36 @@ static ge::graphStatus CalcTiling(
                 useNcWeightReuse = true;
                 return ge::GRAPH_SUCCESS;
             }
+        }
+
+        uint64_t splitCBytesPerElement = weightCacheBytesPerElement + GetNcWeightReuseBufferBytesPerElement(dataType);
+        uint64_t maxSplitCElements = usableUbSize / splitCBytesPerElement;
+        uint64_t splitCTileLength = (maxSplitCElements / blockElementNum) * blockElementNum;
+        if (splitCTileLength >= blockElementNum) {
+            uint64_t cTileNum = CeilDiv(static_cast<uint64_t>(channelSize), splitCTileLength);
+            OP_CHECK_IF(
+                cTileNum > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+                OP_LOGE(context, "Prelu: split-C tile count exceeds int64 range"),
+                return ge::GRAPH_FAILED);
+            OP_CHECK_IF(
+                batchSize > std::numeric_limits<uint64_t>::max() / cTileNum,
+                OP_LOGE(context, "Prelu: split-C total task count exceeds uint64 range"),
+                return ge::GRAPH_FAILED);
+            uint64_t totalTaskNum = batchSize * cTileNum;
+            OP_CHECK_IF(
+                totalTaskNum > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+                OP_LOGE(context, "Prelu: split-C total task count exceeds int64 range"),
+                return ge::GRAPH_FAILED);
+            uint64_t finalCoreNum = std::min(coreLimit, totalTaskNum);
+            tiling->tileLength = static_cast<int64_t>(splitCTileLength);
+            tiling->innerSizeAligned = static_cast<int64_t>(splitCTileLength);
+            tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
+            tiling->tilesPerRow = static_cast<int64_t>(cTileNum);
+            tiling->baseTasks = static_cast<int64_t>(totalTaskNum / finalCoreNum);
+            tiling->extraTasks = static_cast<int64_t>(totalTaskNum % finalCoreNum);
+            usedCoreNum = static_cast<uint32_t>(finalCoreNum);
+            useNcSplitCWeightReuse = true;
+            return ge::GRAPH_SUCCESS;
         }
     }
 
@@ -367,9 +401,11 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
     uint32_t usedCoreNum = 1;
     bool useSplitLParallel = false;
     bool useNcWeightReuse = false;
+    bool useNcSplitCWeightReuse = false;
     OP_CHECK_IF(
         CalcTiling(context, ubSize, coreNum, totalNum, dataType, typeLength, weightMode, channelSize, innerSize,
-            rowNum, tiling, usedCoreNum, useSplitLParallel, useNcWeightReuse) != ge::GRAPH_SUCCESS,
+            rowNum, tiling, usedCoreNum, useSplitLParallel, useNcWeightReuse, useNcSplitCWeightReuse) !=
+            ge::GRAPH_SUCCESS,
         OP_LOGE(context, "CalcTiling error"),
         return ge::GRAPH_FAILED);
 
@@ -379,6 +415,8 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
     if (weightMode == 1) {
         if (useNcWeightReuse) {
             tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_NC_WEIGHT_REUSE_MODE);
+        } else if (useNcSplitCWeightReuse) {
+            tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_MODE);
         } else if (useSplitLParallel) {
             tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_SPLIT_L_PARALLEL_MODE);
         } else if (tiling->innerSizeAligned <= tiling->tileLength) {
