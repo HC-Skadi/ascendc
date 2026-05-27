@@ -46,11 +46,12 @@ public:
     __aicore__ inline void InitChannel(
         GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe);
     __aicore__ inline void ProcessScalar();
-    __aicore__ inline void ProcessChannel();
+    __aicore__ inline void ProcessChannelFullL();
+    __aicore__ inline void ProcessChannelSplitL();
 
 private:
     __aicore__ inline void CopyIn(int64_t progress, uint32_t currentNum);
-    __aicore__ inline void CopyInByOffset(int64_t gmOffset, uint32_t currentNum);
+    __aicore__ inline void CopyInByOffset(int64_t gmOffset, uint32_t currentNum, uint32_t alignedNum);
     __aicore__ inline void CopyOut(int64_t progress, uint32_t currentNum);
     __aicore__ inline void CopyOutByOffset(int64_t gmOffset, uint32_t currentNum);
     __aicore__ inline void Compute(uint32_t currentNum);
@@ -85,6 +86,11 @@ __aicore__ inline float LoadBf16ScalarAsFloat(GM_ADDR weight)
     uint16_t weightBits = *((__gm__ uint16_t*)weight);
     uint32_t floatBits = static_cast<uint32_t>(weightBits) << 16;
     return *reinterpret_cast<float*>(&floatBits);
+}
+
+__aicore__ inline uint32_t AlignUp(uint32_t value, uint32_t align)
+{
+    return ((value + align - 1U) / align) * align;
 }
 
 template <typename T>
@@ -171,10 +177,10 @@ __aicore__ inline void Prelu<T>::CopyIn(int64_t progress, uint32_t currentNum)
 }
 
 template <typename T>
-__aicore__ inline void Prelu<T>::CopyInByOffset(int64_t gmOffset, uint32_t currentNum)
+__aicore__ inline void Prelu<T>::CopyInByOffset(int64_t gmOffset, uint32_t currentNum, uint32_t alignedNum)
 {
     LocalTensor<T> xLocal = inputQueueX.AllocTensor<T>();
-    CopyGmToLocalPad(xLocal, inputGMX[gmOffset], currentNum, static_cast<uint32_t>(innerSizeAligned));
+    CopyGmToLocalPad(xLocal, inputGMX[gmOffset], currentNum, alignedNum);
     inputQueueX.EnQue(xLocal);
 }
 
@@ -247,7 +253,7 @@ __aicore__ inline void Prelu<T>::ProcessScalar()
 }
 
 template <typename T>
-__aicore__ inline void Prelu<T>::ProcessChannel()
+__aicore__ inline void Prelu<T>::ProcessChannelFullL()
 {
     uint32_t realLen = static_cast<uint32_t>(innerSize);
     uint32_t computeLen = static_cast<uint32_t>(innerSizeAligned);
@@ -256,9 +262,31 @@ __aicore__ inline void Prelu<T>::ProcessChannel()
         int64_t channelIdx = rowIdx % channelSize;
         int64_t gmOffset = rowIdx * innerSize;
         LoadChannelWeight(channelIdx);
-        CopyInByOffset(gmOffset, realLen);
+        CopyInByOffset(gmOffset, realLen, computeLen);
         Compute(computeLen);
         CopyOutByOffset(gmOffset, realLen);
+    }
+}
+
+template <typename T>
+__aicore__ inline void Prelu<T>::ProcessChannelSplitL()
+{
+    uint32_t alignElements = static_cast<uint32_t>(32U / sizeof(T));
+    for (int64_t rowProgress = 0; rowProgress < blockRowNum; ++rowProgress) {
+        int64_t rowIdx = rowOffset + rowProgress;
+        int64_t channelIdx = rowIdx % channelSize;
+        LoadChannelWeight(channelIdx);
+
+        for (int64_t tileOffset = 0; tileOffset < innerSize; tileOffset += ubLength) {
+            int64_t remainLen = innerSize - tileOffset;
+            uint32_t realLen = static_cast<uint32_t>(remainLen > ubLength ? ubLength : remainLen);
+            uint32_t computeLen = AlignUp(realLen, alignElements);
+            int64_t gmOffset = rowIdx * innerSize + tileOffset;
+
+            CopyInByOffset(gmOffset, realLen, computeLen);
+            Compute(computeLen);
+            CopyOutByOffset(gmOffset, realLen);
+        }
     }
 }
 

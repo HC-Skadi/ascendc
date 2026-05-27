@@ -12,6 +12,7 @@
 #include "../op_kernel/prelu_tiling_key.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace optiling {
 
@@ -98,6 +99,11 @@ static ge::graphStatus GetShapeAndDtypeInfo(
             xShape.GetDimNum() < 2,
             OP_LOGE(context, "Prelu: channel weight requires x rank >= 2"),
             return ge::GRAPH_FAILED);
+        int64_t batchSize = xShape.GetDim(0);
+        OP_CHECK_IF(
+            batchSize <= 0,
+            OP_LOGE(context, "Prelu: N must be positive, got %ld", batchSize),
+            return ge::GRAPH_FAILED);
         channelSize = xShape.GetDim(1);
         OP_CHECK_IF(
             channelSize <= 0,
@@ -111,13 +117,23 @@ static ge::graphStatus GetShapeAndDtypeInfo(
 
         innerSize = 1;
         for (size_t i = 2; i < xShape.GetDimNum(); ++i) {
+            int64_t dimValue = xShape.GetDim(i);
             OP_CHECK_IF(
-                xShape.GetDim(i) <= 0,
-                OP_LOGE(context, "Prelu: x dim %zu must be positive, got %ld", i, xShape.GetDim(i)),
+                dimValue <= 0,
+                OP_LOGE(context, "Prelu: x dim %zu must be positive, got %ld", i, dimValue),
                 return ge::GRAPH_FAILED);
-            innerSize *= xShape.GetDim(i);
+            OP_CHECK_IF(
+                innerSize > std::numeric_limits<int64_t>::max() / dimValue,
+                OP_LOGE(context, "Prelu: L exceeds int64 range"),
+                return ge::GRAPH_FAILED);
+            innerSize *= dimValue;
         }
-        rowNum = xShape.GetDim(0) * channelSize;
+        OP_CHECK_IF(
+            static_cast<uint64_t>(batchSize) >
+                static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / static_cast<uint64_t>(channelSize),
+            OP_LOGE(context, "Prelu: rowNum exceeds int64 range"),
+            return ge::GRAPH_FAILED);
+        rowNum = batchSize * channelSize;
         weightMode = 1;
     }
 
@@ -196,10 +212,15 @@ static ge::graphStatus CalcTiling(
         return ge::GRAPH_SUCCESS;
     }
 
+    OP_CHECK_IF(innerSize <= 0, OP_LOGE(context, "Prelu: L must be positive"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        static_cast<uint64_t>(innerSize) > std::numeric_limits<uint64_t>::max() - blockElementNum + 1U,
+        OP_LOGE(context, "Prelu: L is too large to align"),
+        return ge::GRAPH_FAILED);
     uint64_t innerSizeAligned = CeilDiv(static_cast<uint64_t>(innerSize), blockElementNum) * blockElementNum;
     OP_CHECK_IF(
-        innerSizeAligned > ubFactor,
-        OP_LOGE(context, "Prelu: aligned L must be less than or equal to tileLength for channel weight"),
+        innerSizeAligned > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+        OP_LOGE(context, "Prelu: aligned L exceeds int64 range"),
         return ge::GRAPH_FAILED);
     uint64_t rowNumU64 = static_cast<uint64_t>(rowNum);
     uint64_t finalCoreNum = rowNumU64 == 0 ? 1U : std::min(coreLimit, rowNumU64);
@@ -255,8 +276,12 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
 
     context->SetBlockDim(usedCoreNum);
 
-    uint64_t tilingKey = (weightMode == 0) ? GET_TPL_TILING_KEY(PRELU_TPL_SCALAR_MODE)
-                                           : GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_MODE);
+    uint64_t tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_SCALAR_MODE);
+    if (weightMode == 1) {
+        tilingKey = (tiling->innerSizeAligned <= tiling->tileLength)
+            ? GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_FULL_L_MODE)
+            : GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_SPLIT_L_MODE);
+    }
     context->SetTilingKey(tilingKey);
     return ge::GRAPH_SUCCESS;
 }
