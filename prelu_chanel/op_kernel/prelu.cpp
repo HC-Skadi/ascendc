@@ -15,9 +15,14 @@ __global__ __aicore__ void prelu(GM_ADDR x, GM_ADDR weight, GM_ADDR y, GM_ADDR w
 #ifdef DTYPE_X
     NsPrelu::Prelu<DTYPE_X> op;
 #else
-    using KernelDtype = std::conditional_t<schMode == PRELU_TPL_SCH_MODE_1, half, float>;
+    using KernelDtype = float;
     NsPrelu::Prelu<KernelDtype> op;
 #endif
-    op.Init(x, weight, y, &tilingData, &pipe);
-    op.Process();
+    if constexpr (schMode == PRELU_TPL_CHANNEL_MODE) {
+        op.InitChannel(x, weight, y, &tilingData, &pipe);
+        op.ProcessChannel();
+    } else {
+        op.InitScalar(x, weight, y, &tilingData, &pipe);
+        op.ProcessScalar();
+    }
 }

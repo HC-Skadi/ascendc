@@ -255,7 +255,8 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
 
     context->SetBlockDim(usedCoreNum);
 
-    uint64_t tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_SCH_MODE_0);
+    uint64_t tilingKey = (weightMode == 0) ? GET_TPL_TILING_KEY(PRELU_TPL_SCALAR_MODE)
+                                           : GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_MODE);
     context->SetTilingKey(tilingKey);
     return ge::GRAPH_SUCCESS;
 }

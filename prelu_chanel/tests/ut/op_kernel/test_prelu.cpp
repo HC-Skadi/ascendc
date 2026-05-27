@@ -71,10 +71,10 @@ TEST_F(PreluKernelTest, test_kernel_run)
     tilingData->baseRows = 0;
     tilingData->extraRows = 0;
     
-    ICPU_SET_TILING_KEY(0);
+    ICPU_SET_TILING_KEY(PRELU_TPL_SCALAR_MODE);
     AscendC::SetKernelMode(KernelMode::AIV_MODE);
     
-    ICPU_RUN_KF((prelu<0>), numBlocks, x, weight, y, workspace, tiling);
+    ICPU_RUN_KF((prelu<PRELU_TPL_SCALAR_MODE>), numBlocks, x, weight, y, workspace, tiling);
 
     memcpy(yHost.data(), y, yByteSize);
     std::vector<float> expected = {-0.75f, -0.25f, 0.0f, 1.0f, 2.0f, -1.0f, 5.0f};
@@ -134,10 +134,10 @@ TEST_F(PreluKernelTest, test_channel_weight_run)
     tilingData->baseRows = n * c;
     tilingData->extraRows = 0;
 
-    ICPU_SET_TILING_KEY(0);
+    ICPU_SET_TILING_KEY(PRELU_TPL_CHANNEL_MODE);
     AscendC::SetKernelMode(KernelMode::AIV_MODE);
 
-    ICPU_RUN_KF((prelu<0>), numBlocks, x, weight, y, workspace, tiling);
+    ICPU_RUN_KF((prelu<PRELU_TPL_CHANNEL_MODE>), numBlocks, x, weight, y, workspace, tiling);
 
     memcpy(yHost.data(), y, yByteSize);
     for (size_t row = 0; row < n * c; ++row) {

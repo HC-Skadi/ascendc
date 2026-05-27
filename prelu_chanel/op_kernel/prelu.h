@@ -41,8 +41,12 @@ class Prelu {
 public:
     __aicore__ inline Prelu() {}
 
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe);
-    __aicore__ inline void Process();
+    __aicore__ inline void InitScalar(
+        GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe);
+    __aicore__ inline void InitChannel(
+        GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe);
+    __aicore__ inline void ProcessScalar();
+    __aicore__ inline void ProcessChannel();
 
 private:
     __aicore__ inline void CopyIn(int64_t progress, uint32_t currentNum);
@@ -51,8 +55,7 @@ private:
     __aicore__ inline void CopyOutByOffset(int64_t gmOffset, uint32_t currentNum);
     __aicore__ inline void Compute(uint32_t currentNum);
     __aicore__ inline void LoadChannelWeight(int64_t channelIdx);
-    __aicore__ inline void ProcessScalar();
-    __aicore__ inline void ProcessChannel();
+    __aicore__ inline void InitBuffers();
 
 private:
     TPipe* pipe_ = nullptr;
@@ -70,7 +73,6 @@ private:
     float weightValFp32 = 0.0f;
     int64_t blockLength = 0;
     int64_t ubLength = 0;
-    int64_t weightMode = 0;
     int64_t channelSize = 1;
     int64_t innerSize = 1;
     int64_t innerSizeAligned = 1;
@@ -86,55 +88,8 @@ __aicore__ inline float LoadBf16ScalarAsFloat(GM_ADDR weight)
 }
 
 template <typename T>
-__aicore__ inline void Prelu<T>::Init(
-    GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe)
+__aicore__ inline void Prelu<T>::InitBuffers()
 {
-    pipe_ = pipe;
-    int64_t blockIdx = GetBlockIdx();
-    ubLength = tilingData->tileLength;
-    weightMode = tilingData->weightMode;
-    channelSize = tilingData->channelSize;
-    innerSize = tilingData->innerSize;
-    innerSizeAligned = tilingData->innerSizeAligned;
-    weightGM = weight;
-
-    if (weightMode == 1) {
-        if (blockIdx < tilingData->extraRows) {
-            blockRowNum = tilingData->baseRows + 1;
-            rowOffset = blockIdx * (tilingData->baseRows + 1);
-        } else if (blockIdx < tilingData->usedCoreNum) {
-            blockRowNum = tilingData->baseRows;
-            rowOffset = tilingData->extraRows * (tilingData->baseRows + 1) +
-                        (blockIdx - tilingData->extraRows) * tilingData->baseRows;
-        } else {
-            blockRowNum = 0;
-            rowOffset = 0;
-        }
-        blockLength = blockRowNum * innerSize;
-        inputGMX.SetGlobalBuffer((__gm__ T*)x, tilingData->totalLength);
-        outputGMY.SetGlobalBuffer((__gm__ T*)y, tilingData->totalLength);
-    } else {
-        int64_t blockOffset = blockIdx * tilingData->formerLength;
-        if (blockIdx < tilingData->formerNum) {
-            blockLength = tilingData->formerLength;
-        } else if (blockIdx < tilingData->usedCoreNum) {
-            blockLength = tilingData->tailLength;
-        } else {
-            blockLength = 0;
-        }
-
-        inputGMX.SetGlobalBuffer((__gm__ T*)x + blockOffset, blockLength);
-        outputGMY.SetGlobalBuffer((__gm__ T*)y + blockOffset, blockLength);
-
-        if constexpr (std::is_same_v<T, bfloat16_t>) {
-            T scalarWeight = *((__gm__ T*)weight);
-            weightValFp32 =  AscendC::Cast(scalarWeight);
-        } else {
-            T scalarWeight = *((__gm__ T*)weight);
-            weightVal = scalarWeight;
-        }
-    }
-
     pipe_->InitBuffer(inputQueueX, BUFFER_NUM, ubLength * sizeof(T));
     pipe_->InitBuffer(outputQueueY, BUFFER_NUM, ubLength * sizeof(T));
     if constexpr (std::is_same_v<T, bfloat16_t>) {
@@ -145,6 +100,66 @@ __aicore__ inline void Prelu<T>::Init(
         pipe_->InitBuffer(tmpBufPos, ubLength * sizeof(T));
         pipe_->InitBuffer(tmpBufNeg, ubLength * sizeof(T));
     }
+}
+
+template <typename T>
+__aicore__ inline void Prelu<T>::InitScalar(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe)
+{
+    pipe_ = pipe;
+    int64_t blockIdx = GetBlockIdx();
+    ubLength = tilingData->tileLength;
+    int64_t blockOffset = blockIdx * tilingData->formerLength;
+    if (blockIdx < tilingData->formerNum) {
+        blockLength = tilingData->formerLength;
+    } else if (blockIdx < tilingData->usedCoreNum) {
+        blockLength = tilingData->tailLength;
+    } else {
+        blockLength = 0;
+    }
+
+    inputGMX.SetGlobalBuffer((__gm__ T*)x + blockOffset, blockLength);
+    outputGMY.SetGlobalBuffer((__gm__ T*)y + blockOffset, blockLength);
+
+    if constexpr (std::is_same_v<T, bfloat16_t>) {
+        T scalarWeight = *((__gm__ T*)weight);
+        weightValFp32 = AscendC::Cast(scalarWeight);
+    } else {
+        T scalarWeight = *((__gm__ T*)weight);
+        weightVal = scalarWeight;
+    }
+
+    InitBuffers();
+}
+
+template <typename T>
+__aicore__ inline void Prelu<T>::InitChannel(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe)
+{
+    pipe_ = pipe;
+    int64_t blockIdx = GetBlockIdx();
+    ubLength = tilingData->tileLength;
+    channelSize = tilingData->channelSize;
+    innerSize = tilingData->innerSize;
+    innerSizeAligned = tilingData->innerSizeAligned;
+    weightGM = weight;
+
+    if (blockIdx < tilingData->extraRows) {
+        blockRowNum = tilingData->baseRows + 1;
+        rowOffset = blockIdx * (tilingData->baseRows + 1);
+    } else if (blockIdx < tilingData->usedCoreNum) {
+        blockRowNum = tilingData->baseRows;
+        rowOffset = tilingData->extraRows * (tilingData->baseRows + 1) +
+                    (blockIdx - tilingData->extraRows) * tilingData->baseRows;
+    } else {
+        blockRowNum = 0;
+        rowOffset = 0;
+    }
+
+    inputGMX.SetGlobalBuffer((__gm__ T*)x, tilingData->totalLength);
+    outputGMY.SetGlobalBuffer((__gm__ T*)y, tilingData->totalLength);
+
+    InitBuffers();
 }
 
 template <typename T>
@@ -244,16 +259,6 @@ __aicore__ inline void Prelu<T>::ProcessChannel()
         CopyInByOffset(gmOffset, realLen);
         Compute(computeLen);
         CopyOutByOffset(gmOffset, realLen);
-    }
-}
-
-template <typename T>
-__aicore__ inline void Prelu<T>::Process()
-{
-    if (weightMode == 1) {
-        ProcessChannel();
-    } else {
-        ProcessScalar();
     }
 }
 
