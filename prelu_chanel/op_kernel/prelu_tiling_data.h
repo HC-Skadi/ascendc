@@ -28,5 +28,6 @@ struct PreluTilingData {
     int64_t groupNum = 0;          // small-L multi-row路径总group数
     int64_t baseGroups = 0;        // small-L multi-row路径每核基础group数
     int64_t extraGroups = 0;       // small-L multi-row路径前extraGroups个核各多处理1个group
+    int64_t groupsPerBatch = 0;    // small-L multi-row路径每个N内的C维group数
 };
 #endif

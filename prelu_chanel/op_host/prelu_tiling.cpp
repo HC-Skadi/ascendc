@@ -203,23 +203,22 @@ static uint64_t AlignUp(uint64_t value, uint64_t align)
 static bool TryCalcSmallLMultiRowTiling(
     ge::DataType dataType, uint32_t typeLength, uint64_t usableUbSize, uint64_t coreLimit,
     uint64_t blockElementNum, uint64_t innerSize, uint64_t innerSizeAligned, uint64_t rowNumU64,
-    PreluTilingData* tiling, uint32_t& usedCoreNum, bool& useSmallLMultiRow)
+    uint64_t channelSize, PreluTilingData* tiling, uint32_t& usedCoreNum, bool& useSmallLMultiRow)
 {
     if (innerSize <= 1U || innerSizeAligned > SMALL_L_MULTI_ROW_THRESHOLD || rowNumU64 < coreLimit) {
         return false;
     }
 
-    uint64_t groupRows = std::min(SMALL_L_MULTI_ROW_GROUP_ROWS, rowNumU64);
+    uint64_t groupRows = std::min(SMALL_L_MULTI_ROW_GROUP_ROWS, channelSize);
+    uint64_t groupsPerBatch = CeilDiv(channelSize, groupRows);
     uint64_t brcbAlignedGroupRows = AlignUp(groupRows, BRCB_SRC_ELEMENT_NUM);
     uint64_t groupElements = brcbAlignedGroupRows * innerSizeAligned;
-    uint64_t brcbBlockElementNum = dataType == ge::DT_BF16 ? BLOCK_SIZE / sizeof(float) : blockElementNum;
-    uint64_t brcbWeightElements = brcbAlignedGroupRows * (innerSizeAligned / brcbBlockElementNum);
     uint64_t alignedGroupRows = AlignUp(groupRows, blockElementNum);
     uint64_t groupBytes = groupElements * GetBufferBytesPerElement(dataType) +
         groupElements * GetWeightVecBytesPerElement(dataType, typeLength) +
-        brcbWeightElements * GetWeightVecBytesPerElement(dataType, typeLength) +
         alignedGroupRows * GetNcWeightCacheBytesPerElement(dataType, typeLength);
-    uint64_t groupNum = CeilDiv(rowNumU64, groupRows);
+    uint64_t batchSize = rowNumU64 / channelSize;
+    uint64_t groupNum = batchSize * groupsPerBatch;
     uint64_t finalCoreNum = std::min(coreLimit, groupNum);
     if (groupBytes > usableUbSize || finalCoreNum == 0U) {
         return false;
@@ -230,6 +229,7 @@ static bool TryCalcSmallLMultiRowTiling(
     tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
     tiling->groupRows = static_cast<int64_t>(groupRows);
     tiling->groupNum = static_cast<int64_t>(groupNum);
+    tiling->groupsPerBatch = static_cast<int64_t>(groupsPerBatch);
     tiling->baseGroups = static_cast<int64_t>(groupNum / finalCoreNum);
     tiling->extraGroups = static_cast<int64_t>(groupNum % finalCoreNum);
     usedCoreNum = static_cast<uint32_t>(finalCoreNum);
@@ -271,6 +271,7 @@ static ge::graphStatus CalcTiling(
     tiling->groupNum = 0;
     tiling->baseGroups = 0;
     tiling->extraGroups = 0;
+    tiling->groupsPerBatch = 0;
 
     uint64_t coreLimit = static_cast<uint64_t>(coreNum);
     if (weightMode == 0) {
@@ -334,11 +335,11 @@ static ge::graphStatus CalcTiling(
         uint64_t weightCacheBytes = weightCacheSizeValid ? alignedChannelSize * weightCacheBytesPerElement : 0U;
         if (batchSize >= coreLimit &&
             TryCalcSmallLMultiRowTiling(dataType, typeLength, usableUbSize, coreLimit, blockElementNum,
-                static_cast<uint64_t>(innerSize), innerSizeAligned, rowNumU64, tiling, usedCoreNum,
-                useSmallLMultiRow)) {
+                static_cast<uint64_t>(innerSize), innerSizeAligned, rowNumU64,
+                static_cast<uint64_t>(channelSize), tiling, usedCoreNum, useSmallLMultiRow)) {
             return ge::GRAPH_SUCCESS;
         }
-        if (innerSize == 1 && weightCacheSizeValid && weightCacheBytes < usableUbSize) {
+        if ((innerSize == 1 || batchSize < coreLimit) && weightCacheSizeValid && weightCacheBytes < usableUbSize) {
             uint64_t ncMaxTileElements =
                 ((usableUbSize - weightCacheBytes) / GetNcWeightReuseBufferBytesPerElement(dataType) /
                  alignedRowElements) *
@@ -357,8 +358,8 @@ static ge::graphStatus CalcTiling(
         }
 
         if (TryCalcSmallLMultiRowTiling(dataType, typeLength, usableUbSize, coreLimit, blockElementNum,
-            static_cast<uint64_t>(innerSize), innerSizeAligned, rowNumU64, tiling, usedCoreNum,
-            useSmallLMultiRow)) {
+            static_cast<uint64_t>(innerSize), innerSizeAligned, rowNumU64, static_cast<uint64_t>(channelSize),
+            tiling, usedCoreNum, useSmallLMultiRow)) {
             return ge::GRAPH_SUCCESS;
         }
 

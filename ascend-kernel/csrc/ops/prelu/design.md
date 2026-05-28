@@ -164,14 +164,14 @@ extraRows = N % usedCoreNum;
 ```cpp
 groupRows = 16;
 innerSizeAligned = AlignUp(L, 32 / sizeof(T));
-groupNum = CeilDiv(N * C, groupRows);
+groupsPerBatch = CeilDiv(C, groupRows);
+groupNum = N * groupsPerBatch;
 usedCoreNum = min(coreLimit, groupNum);
 baseGroups = groupNum / usedCoreNum;
 extraGroups = groupNum % usedCoreNum;
 brcbAlignedGroupRows = AlignUp(groupRows, 8);
 tileLength = brcbAlignedGroupRows * innerSizeAligned;
-brcbWeightElements = brcbAlignedGroupRows * CeilDiv(innerSizeAligned, brcbBlockElementNum);
-ubBytes ~= tileLength * ordinaryBytesPerElement + tileLength * weightVecBytesPerElement + brcbWeightElements * weightVecBytesPerElement + AlignUp(groupRows) * weightCacheBytesPerElement;
+ubBytes ~= tileLength * ordinaryBytesPerElement + tileLength * weightVecBytesPerElement + AlignUp(groupRows) * weightCacheBytesPerElement;
 ```
 
 UB 布局：
@@ -179,7 +179,6 @@ UB 布局：
 ```text
 xLocal      [brcbAlignedGroupRows, innerSizeAligned]
 weightBuf   [AlignUp(groupRows, 32 / sizeof(T))]
-brcbWeight  [brcbAlignedGroupRows * rowBlockNum]
 weightVec   [brcbAlignedGroupRows, innerSizeAligned]
 pos/neg/y   [brcbAlignedGroupRows, innerSizeAligned]
 ```
@@ -302,8 +301,11 @@ CopyOutByOffset(gmOffset, realLen);
 每个 group 处理连续 channel row：
 
 ```cpp
-startRow = groupIdx * groupRows;
-currentRows = min(groupRows, rowNum - startRow);
+cGroupIdx = groupIdx / N;
+nIdx = groupIdx % N;
+cOffset = cGroupIdx * groupRows;
+startRow = nIdx * C + cOffset;
+currentRows = min(groupRows, C - cOffset);
 computeLen = currentRows * innerSizeAligned;
 ```
 
@@ -316,7 +318,7 @@ ComputeSmallLMultiRow(computeLen, currentRows);
 CopyOutSmallLRows(startRow, currentRows);
 ```
 
-`CopyInSmallLRows` 和 `CopyOutSmallLRows` 按 row 拷贝，每个 row 在 UB 中使用 `innerSizeAligned` stride，行尾 padding 到 32B 对齐。`CopySmallLWeights` 对连续 channel group 直接用一次 `DataCopyPad` 搬运 `weight[c:c+rows]`；若 group 跨 N 边界则退化为少量标量填充。`ComputeSmallLMultiRow` 先对整个 group 做 `Maxs/Mins`。`BuildSmallLWeightVec` 会先把每个 row 的 weight 按 row 内 datablock 数展开为 `brcbWeight`，例如 `L=31,float32` 时生成 `[w0,w0,w0,w0,w1,w1,w1,w1,...]`，再通过一次 `Brcb` 生成完整 `weightVec`，最后用一次 `Mul` 完成所有 row 的负半轴乘权重。
+`CopyInSmallLRows` 和 `CopyOutSmallLRows` 按 row 拷贝，每个 row 在 UB 中使用 `innerSizeAligned` stride，行尾 padding 到 32B 对齐。group 按 C-group-major 顺序调度，同一个 C group 会连续覆盖多个 N，因此 kernel 只在 `cGroupIdx` 变化时调用 `CopySmallLWeights` 和 `BuildSmallLWeightVec`，在 N 维复用同一段 `weightVec`。`BuildSmallLWeightVec` 使用 `Duplicate` 将每个 row 的 weight 填满对应 `[innerSizeAligned]` 段；`ComputeSmallLMultiRow` 先做 `Maxs/Mins`，再用一次 `Mul(neg, neg, weightVec, computeLen)` 完成所有 row 的负半轴乘权重。小 batch 且整行 `C*L` 可放入 UB 的场景回到 NC weight reuse 路径，避免 key6 处理小 shape。
 
 ## 5. 测试覆盖
 

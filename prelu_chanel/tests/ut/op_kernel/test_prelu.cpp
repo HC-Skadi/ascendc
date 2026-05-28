@@ -659,6 +659,7 @@ TEST_F(PreluKernelTest, test_channel_small_l_multi_row_run)
     tilingData->groupNum = 3;
     tilingData->baseGroups = 1;
     tilingData->extraGroups = 0;
+    tilingData->groupsPerBatch = 3;
 
     ICPU_SET_TILING_KEY(PRELU_TPL_CHANNEL_SMALL_L_MULTI_ROW_MODE);
     AscendC::SetKernelMode(KernelMode::AIV_MODE);
