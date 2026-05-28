@@ -170,7 +170,8 @@ baseGroups = groupNum / usedCoreNum;
 extraGroups = groupNum % usedCoreNum;
 brcbAlignedGroupRows = AlignUp(groupRows, 8);
 tileLength = brcbAlignedGroupRows * innerSizeAligned;
-ubBytes ~= tileLength * ordinaryBytesPerElement + tileLength * weightVecBytesPerElement + AlignUp(groupRows) * weightCacheBytesPerElement;
+brcbWeightElements = brcbAlignedGroupRows * CeilDiv(innerSizeAligned, brcbBlockElementNum);
+ubBytes ~= tileLength * ordinaryBytesPerElement + tileLength * weightVecBytesPerElement + brcbWeightElements * weightVecBytesPerElement + AlignUp(groupRows) * weightCacheBytesPerElement;
 ```
 
 UB 布局：
@@ -178,6 +179,7 @@ UB 布局：
 ```text
 xLocal      [brcbAlignedGroupRows, innerSizeAligned]
 weightBuf   [AlignUp(groupRows, 32 / sizeof(T))]
+brcbWeight  [brcbAlignedGroupRows * rowBlockNum]
 weightVec   [brcbAlignedGroupRows, innerSizeAligned]
 pos/neg/y   [brcbAlignedGroupRows, innerSizeAligned]
 ```
@@ -314,7 +316,7 @@ ComputeSmallLMultiRow(computeLen, currentRows);
 CopyOutSmallLRows(startRow, currentRows);
 ```
 
-`CopyInSmallLRows` 和 `CopyOutSmallLRows` 按 row 拷贝，每个 row 在 UB 中使用 `innerSizeAligned` stride，行尾 padding 到 32B 对齐。`CopySmallLWeights` 对连续 channel group 直接用一次 `DataCopyPad` 搬运 `weight[c:c+rows]`；若 group 跨 N 边界则退化为少量标量填充。`ComputeSmallLMultiRow` 先对整个 group 做 `Maxs/Mins`，再通过 `Brcb` 将每 8 个 weight 广播到对应 row 的 32B datablock，最后用一次 `Mul` 完成所有 row 的负半轴乘权重。
+`CopyInSmallLRows` 和 `CopyOutSmallLRows` 按 row 拷贝，每个 row 在 UB 中使用 `innerSizeAligned` stride，行尾 padding 到 32B 对齐。`CopySmallLWeights` 对连续 channel group 直接用一次 `DataCopyPad` 搬运 `weight[c:c+rows]`；若 group 跨 N 边界则退化为少量标量填充。`ComputeSmallLMultiRow` 先对整个 group 做 `Maxs/Mins`。`BuildSmallLWeightVec` 会先把每个 row 的 weight 按 row 内 datablock 数展开为 `brcbWeight`，例如 `L=31,float32` 时生成 `[w0,w0,w0,w0,w1,w1,w1,w1,...]`，再通过一次 `Brcb` 生成完整 `weightVec`，最后用一次 `Mul` 完成所有 row 的负半轴乘权重。
 
 ## 5. 测试覆盖
 
