@@ -25,6 +25,7 @@ constexpr uint64_t UB_RESERVED_SIZE = 1024U;
 constexpr uint64_t SMALL_L_WEIGHT_REUSE_MAX_INNER_SIZE = 16U;
 constexpr uint64_t SPLIT_C_WEIGHT_REUSE_MAX_INNER_SIZE = 64U;
 constexpr uint64_t LARGE_C_WEIGHT_REUSE_MIN_CHANNEL_SIZE = 32U;
+constexpr uint64_t MIN_SPLIT_C_WEIGHT_REUSE_CORE_NUM = 10U;
 
 static ge::graphStatus GetPlatformInfo(gert::TilingContext* context, uint64_t& ubSize, int64_t& coreNum)
 {
@@ -351,15 +352,17 @@ static ge::graphStatus CalcTiling(
                     OP_LOGE(context, "Prelu: small-L split-C total task count exceeds int64 range"),
                     return ge::GRAPH_FAILED);
                 uint64_t finalCoreNum = std::min(coreLimit, totalTaskNum);
-                tiling->tileLength = static_cast<int64_t>(splitCTileChannels);
-                tiling->innerSizeAligned = static_cast<int64_t>(alignedSplitCElements);
-                tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
-                tiling->tilesPerRow = static_cast<int64_t>(cTileNum);
-                tiling->baseTasks = static_cast<int64_t>(totalTaskNum / finalCoreNum);
-                tiling->extraTasks = static_cast<int64_t>(totalTaskNum % finalCoreNum);
-                usedCoreNum = static_cast<uint32_t>(finalCoreNum);
-                useNcSplitCWeightReuse = true;
-                return ge::GRAPH_SUCCESS;
+                if (finalCoreNum >= std::min(coreLimit, MIN_SPLIT_C_WEIGHT_REUSE_CORE_NUM)) {
+                    tiling->tileLength = static_cast<int64_t>(splitCTileChannels);
+                    tiling->innerSizeAligned = static_cast<int64_t>(alignedSplitCElements);
+                    tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
+                    tiling->tilesPerRow = static_cast<int64_t>(cTileNum);
+                    tiling->baseTasks = static_cast<int64_t>(totalTaskNum / finalCoreNum);
+                    tiling->extraTasks = static_cast<int64_t>(totalTaskNum % finalCoreNum);
+                    usedCoreNum = static_cast<uint32_t>(finalCoreNum);
+                    useNcSplitCWeightReuse = true;
+                    return ge::GRAPH_SUCCESS;
+                }
             }
         }
     }

@@ -172,6 +172,14 @@ totalTaskNum = N * cTileNum;
 usedCoreNum = min(coreLimit, totalTaskNum);
 ```
 
+为了避免 `[1, C, L]` 这类输入被切成过少 task 导致 AIV 利用率下降，`L > 1` 的 split-C 还要求：
+
+```cpp
+usedCoreNum >= min(coreLimit, 10)
+```
+
+若 C 分块 task 数不足，则回退到常规 channel full/split 路径，让 `(n,c)` row 维度提供更多并行度。
+
 写入 tiling：
 
 ```cpp
@@ -184,8 +192,8 @@ extraTasks = totalTaskNum % usedCoreNum;
 
 示例：
 
-- `[1, 2048, 7]`，float32，256KB UB：`splitCTileChannels=1304`，`tilesPerRow=2`，`usedCoreNum=2`
-- `[1, 2048, 7, 7]`，即 `L=49`：`splitCTileChannels=184`，`tilesPerRow=12`，`usedCoreNum=12`
+- `[1, 2048, 7]`，float32，256KB UB：split-C 只能切出 2 个 task，低于 10 核收益门槛，回退到 channel full-L，`usedCoreNum=40`
+- `[1, 2048, 7, 7]`，即 `L=49`：`splitCTileChannels=184`，`tilesPerRow=12`，`usedCoreNum=12`，进入 split-C
 
 这比 full-L 的 `N*C=2048` 个小 row 分到 40 个核更适合该场景。
 
@@ -263,7 +271,7 @@ Host tiling UT 覆盖：
 - channel full-L：`[2,3,5]`
 - NC row weight reuse：`[64,3]`
 - small-L row weight reuse：`[8,128,4]`
-- small-L split-C weight reuse：`[1,2048,7]`
+- small-L split-C 收益不足 fallback：`[1,2048,7]`
 - medium-L split-C weight reuse：`[1,2048,7,7]`
 - NC split-C weight reuse：`[1,70000]`
 - channel split-L / split-L parallel：大 L case
