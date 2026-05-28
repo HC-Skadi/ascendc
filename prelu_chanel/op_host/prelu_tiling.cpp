@@ -333,13 +333,7 @@ static ge::graphStatus CalcTiling(
         bool weightCacheSizeValid = alignedChannelSize <=
             std::numeric_limits<uint64_t>::max() / weightCacheBytesPerElement;
         uint64_t weightCacheBytes = weightCacheSizeValid ? alignedChannelSize * weightCacheBytesPerElement : 0U;
-        if (batchSize >= coreLimit &&
-            TryCalcSmallLMultiRowTiling(dataType, typeLength, usableUbSize, coreLimit, blockElementNum,
-                static_cast<uint64_t>(innerSize), innerSizeAligned, rowNumU64,
-                static_cast<uint64_t>(channelSize), tiling, usedCoreNum, useSmallLMultiRow)) {
-            return ge::GRAPH_SUCCESS;
-        }
-        if ((innerSize == 1 || batchSize < coreLimit) && weightCacheSizeValid && weightCacheBytes < usableUbSize) {
+        if (weightCacheSizeValid && weightCacheBytes < usableUbSize) {
             uint64_t ncMaxTileElements =
                 ((usableUbSize - weightCacheBytes) / GetNcWeightReuseBufferBytesPerElement(dataType) /
                  alignedRowElements) *

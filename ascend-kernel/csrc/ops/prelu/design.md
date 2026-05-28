@@ -318,7 +318,7 @@ ComputeSmallLMultiRow(computeLen, currentRows);
 CopyOutSmallLRows(startRow, currentRows);
 ```
 
-`CopyInSmallLRows` 和 `CopyOutSmallLRows` 按 row 拷贝，每个 row 在 UB 中使用 `innerSizeAligned` stride，行尾 padding 到 32B 对齐。group 按 C-group-major 顺序调度，同一个 C group 会连续覆盖多个 N，因此 kernel 只在 `cGroupIdx` 变化时调用 `CopySmallLWeights` 和 `BuildSmallLWeightVec`，在 N 维复用同一段 `weightVec`。`BuildSmallLWeightVec` 使用 `Duplicate` 将每个 row 的 weight 填满对应 `[innerSizeAligned]` 段；`ComputeSmallLMultiRow` 先做 `Maxs/Mins`，再用一次 `Mul(neg, neg, weightVec, computeLen)` 完成所有 row 的负半轴乘权重。小 batch 且整行 `C*L` 可放入 UB 的场景回到 NC weight reuse 路径，避免 key6 处理小 shape。
+`CopyInSmallLRows` 和 `CopyOutSmallLRows` 按 row 拷贝，每个 row 在 UB 中使用 `innerSizeAligned` stride，行尾 padding 到 32B 对齐。group 按 C-group-major 顺序调度，同一个 C group 会连续覆盖多个 N，因此 kernel 只在 `cGroupIdx` 变化时调用 `CopySmallLWeights` 和 `BuildSmallLWeightVec`，在 N 维复用同一段 `weightVec`。`BuildSmallLWeightVec` 使用 `Duplicate` 将每个 row 的 weight 填满对应 `[innerSizeAligned]` 段；`ComputeSmallLMultiRow` 先做 `Maxs/Mins`，再用一次 `Mul(neg, neg, weightVec, computeLen)` 完成所有 row 的负半轴乘权重。若整行 `C*L` 可放入 UB，则优先回到 NC weight reuse 路径，由 key4 做整行连续搬运并在每核内复用 `weightVec`，避免 key6 处理可连续搬运的 shape。
 
 ## 5. 测试覆盖
 

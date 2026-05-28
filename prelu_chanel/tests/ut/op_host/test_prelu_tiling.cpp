@@ -63,7 +63,7 @@ static PreluTestParam testCases[] = {
         {0}, 64, 262144, 4096},
     {"prelu_channel_small_l_multi_row_n100_c197_l31", {100, 197, 31}, ge::DT_FLOAT, ge::FORMAT_ND, {197},
         ge::DT_FLOAT, ge::FORMAT_ND, {100, 197, 31}, ge::DT_FLOAT, ge::FORMAT_ND, "Ascend910B",
-        ge::GRAPH_SUCCESS, 6UL, "610700 40 0 0 0 512 197 31 32 0 0 0 0 0 16 1300 32 20 13 ",
+        ge::GRAPH_SUCCESS, 4UL, "610700 40 0 0 0 6112 197 31 6112 2 20 0 0 0 0 0 0 0 0 ",
         {0}, 64, 262144, 4096},
     {"prelu_channel_small_l_split_c_benefit_low", {1, 2048, 7}, ge::DT_FLOAT, ge::FORMAT_ND, {2048},
         ge::DT_FLOAT, ge::FORMAT_ND, {1, 2048, 7}, ge::DT_FLOAT, ge::FORMAT_ND, "Ascend910B",

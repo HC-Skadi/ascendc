@@ -780,6 +780,10 @@ __aicore__ inline void Prelu<T>::ProcessChannelSplitLParallel()
 template <typename T>
 __aicore__ inline void Prelu<T>::ProcessChannelNcWeightReuse()
 {
+    if (blockRowNum <= 0) {
+        return;
+    }
+    BuildNcWeightVec(rowsPerTile);
     for (int64_t rowProgress = 0; rowProgress < blockRowNum; rowProgress += rowsPerTile) {
         int64_t tileRows = blockRowNum - rowProgress;
         tileRows = tileRows > rowsPerTile ? rowsPerTile : tileRows;
@@ -787,7 +791,6 @@ __aicore__ inline void Prelu<T>::ProcessChannelNcWeightReuse()
         int64_t nOffset = rowOffset + rowProgress;
 
         CopyInNcByRows(nOffset, tileRows);
-        BuildNcWeightVec(tileRows);
         ComputeNc(computeLen);
         CopyOutNcByRows(nOffset, tileRows);
     }
