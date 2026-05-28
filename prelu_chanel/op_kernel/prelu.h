@@ -507,50 +507,16 @@ __aicore__ inline void Prelu<T>::BuildNcWeightVec(int64_t tileRows)
     if constexpr (std::is_same_v<T, bfloat16_t>) {
         LocalTensor<float> weightLocal = weightFp32Buf.Get<float>();
         LocalTensor<float> weightVec = weightVecBuf.Get<float>();
-        if (innerSize == 1) {
-            for (int64_t row = 0; row < tileRows; ++row) {
-                int64_t rowOffset = row * alignedChannelSize;
-                DataCopy(weightVec[rowOffset], weightLocal, static_cast<uint32_t>(alignedWeightSize));
-            }
-        } else {
-            int64_t localOffset = 0;
-            for (int64_t channelIdx = 0; channelIdx < activeChannelSize; ++channelIdx) {
-                float weightValue = weightLocal.GetValue(channelIdx);
-                for (int64_t innerIdx = 0; innerIdx < innerSize; ++innerIdx) {
-                    weightVec.SetValue(localOffset + innerIdx, weightValue);
-                }
-                localOffset += innerSize;
-            }
-            for (int64_t padIdx = activeChannelSize * innerSize; padIdx < alignedChannelSize; ++padIdx) {
-                weightVec.SetValue(padIdx, 0.0f);
-            }
-            for (int64_t row = 1; row < tileRows; ++row) {
-                DataCopy(weightVec[row * alignedChannelSize], weightVec, static_cast<uint32_t>(alignedChannelSize));
-            }
+        for (int64_t row = 0; row < tileRows; ++row) {
+            int64_t rowOffset = row * alignedChannelSize;
+            DataCopy(weightVec[rowOffset], weightLocal, static_cast<uint32_t>(alignedWeightSize));
         }
     } else {
         LocalTensor<T> weightLocal = weightBuf.Get<T>();
         LocalTensor<T> weightVec = weightVecBuf.Get<T>();
-        if (innerSize == 1) {
-            for (int64_t row = 0; row < tileRows; ++row) {
-                int64_t rowOffset = row * alignedChannelSize;
-                DataCopy(weightVec[rowOffset], weightLocal, static_cast<uint32_t>(alignedWeightSize));
-            }
-        } else {
-            int64_t localOffset = 0;
-            for (int64_t channelIdx = 0; channelIdx < activeChannelSize; ++channelIdx) {
-                T weightValue = weightLocal.GetValue(channelIdx);
-                for (int64_t innerIdx = 0; innerIdx < innerSize; ++innerIdx) {
-                    weightVec.SetValue(localOffset + innerIdx, weightValue);
-                }
-                localOffset += innerSize;
-            }
-            for (int64_t padIdx = activeChannelSize * innerSize; padIdx < alignedChannelSize; ++padIdx) {
-                weightVec.SetValue(padIdx, static_cast<T>(0));
-            }
-            for (int64_t row = 1; row < tileRows; ++row) {
-                DataCopy(weightVec[row * alignedChannelSize], weightVec, static_cast<uint32_t>(alignedChannelSize));
-            }
+        for (int64_t row = 0; row < tileRows; ++row) {
+            int64_t rowOffset = row * alignedChannelSize;
+            DataCopy(weightVec[rowOffset], weightLocal, static_cast<uint32_t>(alignedWeightSize));
         }
     }
     PipeBarrier<PIPE_ALL>();
