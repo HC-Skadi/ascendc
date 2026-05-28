@@ -24,10 +24,5 @@ struct PreluTilingData {
     int64_t tilesPerRow = 0;       // split-L parallel路径每个row的L维tile数
     int64_t baseTasks = 0;         // split-L parallel路径每核基础task数
     int64_t extraTasks = 0;        // split-L parallel路径前extraTasks个核各多处理1个task
-    int64_t groupRows = 0;         // small-L multi-row路径每组row数
-    int64_t groupNum = 0;          // small-L multi-row路径总group数
-    int64_t baseGroups = 0;        // small-L multi-row路径每核基础group数
-    int64_t extraGroups = 0;       // small-L multi-row路径前extraGroups个核各多处理1个group
-    int64_t groupsPerBatch = 0;    // small-L multi-row路径每个N内的C维group数
 };
 #endif
