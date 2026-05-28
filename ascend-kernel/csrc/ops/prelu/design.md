@@ -168,22 +168,24 @@ groupNum = CeilDiv(N * C, groupRows);
 usedCoreNum = min(coreLimit, groupNum);
 baseGroups = groupNum / usedCoreNum;
 extraGroups = groupNum % usedCoreNum;
-tileLength = groupRows * innerSizeAligned;
-ubBytes ~= tileLength * ordinaryBytesPerElement + AlignUp(groupRows) * weightCacheBytesPerElement;
+brcbAlignedGroupRows = AlignUp(groupRows, 8);
+tileLength = brcbAlignedGroupRows * innerSizeAligned;
+ubBytes ~= tileLength * ordinaryBytesPerElement + tileLength * weightVecBytesPerElement + AlignUp(groupRows) * weightCacheBytesPerElement;
 ```
 
 UB 布局：
 
 ```text
-xLocal      [groupRows, innerSizeAligned]
+xLocal      [brcbAlignedGroupRows, innerSizeAligned]
 weightBuf   [AlignUp(groupRows, 32 / sizeof(T))]
-pos/neg/y   [groupRows, innerSizeAligned]
+weightVec   [brcbAlignedGroupRows, innerSizeAligned]
+pos/neg/y   [brcbAlignedGroupRows, innerSizeAligned]
 ```
 
 示例：
 
-- `[1, 2048, 7]`，float32：`innerSizeAligned=8`，`groupNum=128`，`usedCoreNum=40`
-- `[1, 2048, 7, 7]`，float32：`innerSizeAligned=56`，`groupNum=128`，`usedCoreNum=40`
+- `[1, 2048, 7]`，float32：`tileLength=128`，`groupNum=128`，`usedCoreNum=40`
+- `[1, 2048, 7, 7]`，float32：`tileLength=896`，`groupNum=128`，`usedCoreNum=40`
 
 ### NC / Small-Medium-L Split-C Weight Reuse
 
@@ -312,7 +314,7 @@ ComputeSmallLMultiRow(computeLen, currentRows);
 CopyOutSmallLRows(startRow, currentRows);
 ```
 
-`CopyInSmallLRows` 和 `CopyOutSmallLRows` 当前使用 row 循环版 `DataCopyPad`，语义为 GM `[rows, L]` 与 UB `[rows, innerSizeAligned]` 之间拷贝。`CopySmallLWeights` 对连续 channel group 直接用一次 `DataCopyPad` 搬运 `weight[c:c+rows]`；若 group 跨 N 边界则退化为少量标量填充。`ComputeSmallLMultiRow` 先对整个 group 做 `Maxs/Mins`，然后按 row 使用对应 weight 做分段 `Muls`，避免把 weight 展开成 `[groupRows, innerSizeAligned]`。
+`CopyInSmallLRows` 和 `CopyOutSmallLRows` 按 row 拷贝，每个 row 在 UB 中使用 `innerSizeAligned` stride，行尾 padding 到 32B 对齐。`CopySmallLWeights` 对连续 channel group 直接用一次 `DataCopyPad` 搬运 `weight[c:c+rows]`；若 group 跨 N 边界则退化为少量标量填充。`ComputeSmallLMultiRow` 先对整个 group 做 `Maxs/Mins`，再通过 `Brcb` 将每 8 个 weight 广播到对应 row 的 32B datablock，最后用一次 `Mul` 完成所有 row 的负半轴乘权重。
 
 ## 5. 测试覆盖
 

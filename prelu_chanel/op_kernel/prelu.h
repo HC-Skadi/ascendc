@@ -18,6 +18,7 @@ namespace NsPrelu {
 using namespace AscendC;
 
 constexpr int32_t BUFFER_NUM = 2;
+constexpr uint32_t BRCB_SRC_ELEMENT_NUM = 8U;
 
 template <typename T>
 __aicore__ inline void CopyGmToLocalPad(
@@ -74,6 +75,7 @@ private:
     __aicore__ inline void ComputeNc(uint32_t computeLen);
     __aicore__ inline void ComputeSmallLMultiRow(uint32_t computeLen, int64_t currentRows);
     __aicore__ inline void BuildNcWeightVec(int64_t tileRows);
+    __aicore__ inline void BuildSmallLWeightVec(int64_t currentRows);
     __aicore__ inline void CopySmallLWeights(int64_t startRow, int64_t currentRows);
     __aicore__ inline void CopyWeightTile(int64_t cOffset, uint32_t realC, uint32_t alignedC);
     __aicore__ inline void LoadChannelWeight(int64_t channelIdx);
@@ -175,10 +177,12 @@ __aicore__ inline void Prelu<T>::InitSmallLBuffers()
         pipe_->InitBuffer(tmpXFp32, ubLength * sizeof(float));
         pipe_->InitBuffer(tmpBufPos, ubLength * sizeof(float));
         pipe_->InitBuffer(tmpBufNeg, ubLength * sizeof(float));
+        pipe_->InitBuffer(weightVecBuf, ubLength * sizeof(float));
         pipe_->InitBuffer(weightFp32Buf, alignedWeightSize * sizeof(float));
     } else {
         pipe_->InitBuffer(tmpBufPos, ubLength * sizeof(T));
         pipe_->InitBuffer(tmpBufNeg, ubLength * sizeof(T));
+        pipe_->InitBuffer(weightVecBuf, ubLength * sizeof(T));
     }
 }
 
@@ -362,9 +366,10 @@ __aicore__ inline void Prelu<T>::InitChannelSmallLMultiRow(
     innerSizeAligned = tilingData->innerSizeAligned;
     totalLength = tilingData->totalLength;
     groupRows = tilingData->groupRows;
-    ubLength = groupRows * innerSizeAligned;
+    ubLength = tilingData->tileLength;
     alignedChannelSize = innerSizeAligned;
-    alignedWeightSize = AlignUp(static_cast<uint32_t>(groupRows), static_cast<uint32_t>(32U / sizeof(T)));
+    alignedWeightSize = AlignUp(static_cast<uint32_t>(groupRows), BRCB_SRC_ELEMENT_NUM);
+    alignedWeightSize = AlignUp(alignedWeightSize, static_cast<uint32_t>(32U / sizeof(T)));
     weightGM = weight;
 
     if (blockIdx < tilingData->extraGroups) {
@@ -552,6 +557,36 @@ __aicore__ inline void Prelu<T>::BuildNcWeightVec(int64_t tileRows)
 }
 
 template <typename T>
+__aicore__ inline void Prelu<T>::BuildSmallLWeightVec(int64_t currentRows)
+{
+    uint32_t repeatTimes = (static_cast<uint32_t>(currentRows) + BRCB_SRC_ELEMENT_NUM - 1U) / BRCB_SRC_ELEMENT_NUM;
+    if (repeatTimes == 0U) {
+        return;
+    }
+
+    if constexpr (std::is_same_v<T, bfloat16_t>) {
+        LocalTensor<float> weightLocal = weightFp32Buf.Get<float>();
+        LocalTensor<float> weightVec = weightVecBuf.Get<float>();
+        constexpr uint32_t blockElems = 32U / sizeof(float);
+        uint16_t rowStrideBlocks = static_cast<uint16_t>(innerSizeAligned / blockElems);
+        BrcbRepeatParams brcbParams{rowStrideBlocks, static_cast<uint16_t>(rowStrideBlocks * BRCB_SRC_ELEMENT_NUM)};
+        for (uint16_t blockIdx = 0; blockIdx < rowStrideBlocks; ++blockIdx) {
+            Brcb(weightVec[blockIdx * blockElems], weightLocal, static_cast<uint8_t>(repeatTimes), brcbParams);
+        }
+    } else {
+        LocalTensor<T> weightLocal = weightBuf.Get<T>();
+        LocalTensor<T> weightVec = weightVecBuf.Get<T>();
+        constexpr uint32_t blockElems = 32U / sizeof(T);
+        uint16_t rowStrideBlocks = static_cast<uint16_t>(innerSizeAligned / blockElems);
+        BrcbRepeatParams brcbParams{rowStrideBlocks, static_cast<uint16_t>(rowStrideBlocks * BRCB_SRC_ELEMENT_NUM)};
+        for (uint16_t blockIdx = 0; blockIdx < rowStrideBlocks; ++blockIdx) {
+            Brcb(weightVec[blockIdx * blockElems], weightLocal, static_cast<uint8_t>(repeatTimes), brcbParams);
+        }
+    }
+    PipeBarrier<PIPE_ALL>();
+}
+
+template <typename T>
 __aicore__ inline void Prelu<T>::CopySmallLWeights(int64_t startRow, int64_t currentRows)
 {
     LocalTensor<T> weightLocal = weightBuf.Get<T>();
@@ -618,28 +653,22 @@ __aicore__ inline void Prelu<T>::ComputeSmallLMultiRow(uint32_t computeLen, int6
         LocalTensor<float> xFp32 = tmpXFp32.Get<float>();
         LocalTensor<float> pos = tmpBufPos.Get<float>();
         LocalTensor<float> neg = tmpBufNeg.Get<float>();
-        LocalTensor<float> weightLocal = weightFp32Buf.Get<float>();
+        LocalTensor<float> weightVec = weightVecBuf.Get<float>();
         Cast(xFp32, xLocal, RoundMode::CAST_NONE, computeLen);
         Maxs(pos, xFp32, 0.0f, computeLen);
         Mins(neg, xFp32, 0.0f, computeLen);
-        for (int64_t row = 0; row < currentRows; ++row) {
-            int64_t localOffset = row * innerSizeAligned;
-            float weightValue = weightLocal.GetValue(row);
-            Muls(neg[localOffset], neg[localOffset], weightValue, static_cast<uint32_t>(innerSizeAligned));
-        }
+        BuildSmallLWeightVec(currentRows);
+        Mul(neg, neg, weightVec, computeLen);
         Add(pos, pos, neg, computeLen);
         Cast(yLocal, pos, RoundMode::CAST_RINT, computeLen);
     } else {
         LocalTensor<T> pos = tmpBufPos.Get<T>();
         LocalTensor<T> neg = tmpBufNeg.Get<T>();
-        LocalTensor<T> weightLocal = weightBuf.Get<T>();
+        LocalTensor<T> weightVec = weightVecBuf.Get<T>();
         Maxs(pos, xLocal, static_cast<T>(0), computeLen);
         Mins(neg, xLocal, static_cast<T>(0), computeLen);
-        for (int64_t row = 0; row < currentRows; ++row) {
-            int64_t localOffset = row * innerSizeAligned;
-            T weightValue = weightLocal.GetValue(row);
-            Muls(neg[localOffset], neg[localOffset], weightValue, static_cast<uint32_t>(innerSizeAligned));
-        }
+        BuildSmallLWeightVec(currentRows);
+        Mul(neg, neg, weightVec, computeLen);
         Add(yLocal, pos, neg, computeLen);
     }
 

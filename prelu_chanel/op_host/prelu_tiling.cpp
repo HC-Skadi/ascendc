@@ -28,6 +28,7 @@ constexpr uint64_t LARGE_C_WEIGHT_REUSE_MIN_CHANNEL_SIZE = 32U;
 constexpr uint64_t MIN_SPLIT_C_WEIGHT_REUSE_CORE_NUM = 10U;
 constexpr uint64_t SMALL_L_MULTI_ROW_THRESHOLD = 128U;
 constexpr uint64_t SMALL_L_MULTI_ROW_GROUP_ROWS = 16U;
+constexpr uint64_t BRCB_SRC_ELEMENT_NUM = 8U;
 
 static ge::graphStatus GetPlatformInfo(gert::TilingContext* context, uint64_t& ubSize, int64_t& coreNum)
 {
@@ -181,6 +182,14 @@ static uint64_t GetNcWeightCacheBytesPerElement(ge::DataType dataType, uint32_t 
     return bytes;
 }
 
+static uint64_t GetWeightVecBytesPerElement(ge::DataType dataType, uint32_t typeLength)
+{
+    if (dataType == ge::DT_BF16) {
+        return sizeof(float);
+    }
+    return typeLength;
+}
+
 static uint64_t CeilDiv(uint64_t value, uint64_t factor)
 {
     return (value + factor - 1U) / factor;
@@ -307,9 +316,11 @@ static ge::graphStatus CalcTiling(
         if (static_cast<uint64_t>(innerSize) > 1U && innerSizeAligned <= SMALL_L_MULTI_ROW_THRESHOLD &&
             rowNumU64 >= coreLimit) {
             uint64_t groupRows = std::min(SMALL_L_MULTI_ROW_GROUP_ROWS, rowNumU64);
-            uint64_t groupElements = groupRows * innerSizeAligned;
+            uint64_t brcbAlignedGroupRows = AlignUp(groupRows, BRCB_SRC_ELEMENT_NUM);
+            uint64_t groupElements = brcbAlignedGroupRows * innerSizeAligned;
             uint64_t alignedGroupRows = AlignUp(groupRows, blockElementNum);
             uint64_t groupBytes = groupElements * GetBufferBytesPerElement(dataType) +
+                groupElements * GetWeightVecBytesPerElement(dataType, typeLength) +
                 alignedGroupRows * GetNcWeightCacheBytesPerElement(dataType, typeLength);
             uint64_t groupNum = CeilDiv(rowNumU64, groupRows);
             uint64_t finalCoreNum = std::min(coreLimit, groupNum);
