@@ -567,7 +567,10 @@ __aicore__ inline void Prelu<T>::BuildSmallLWeightVec(int64_t currentRows)
         for (int64_t row = 0; row < currentRows; ++row) {
             float weightValue = weightLocal.GetValue(row);
             int64_t localOffset = row * innerSizeAligned;
-            Duplicate(weightVec[localOffset], weightValue, static_cast<uint32_t>(innerSizeAligned));
+            constexpr uint32_t blockElems = 32U / sizeof(float);
+            for (int64_t blockOffset = 0; blockOffset < innerSizeAligned; blockOffset += blockElems) {
+                Duplicate(weightVec[localOffset + blockOffset], weightValue, blockElems);
+            }
         }
     } else {
         LocalTensor<T> weightLocal = weightBuf.Get<T>();
@@ -575,7 +578,10 @@ __aicore__ inline void Prelu<T>::BuildSmallLWeightVec(int64_t currentRows)
         for (int64_t row = 0; row < currentRows; ++row) {
             T weightValue = weightLocal.GetValue(row);
             int64_t localOffset = row * innerSizeAligned;
-            Duplicate(weightVec[localOffset], weightValue, static_cast<uint32_t>(innerSizeAligned));
+            constexpr uint32_t blockElems = 32U / sizeof(T);
+            for (int64_t blockOffset = 0; blockOffset < innerSizeAligned; blockOffset += blockElems) {
+                Duplicate(weightVec[localOffset + blockOffset], weightValue, blockElems);
+            }
         }
     }
     PipeBarrier<PIPE_ALL>();
