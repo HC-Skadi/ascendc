@@ -169,13 +169,14 @@ usedCoreNum = min(coreLimit, groupNum);
 baseGroups = groupNum / usedCoreNum;
 extraGroups = groupNum % usedCoreNum;
 tileLength = groupRows * innerSizeAligned;
+ubBytes ~= tileLength * ordinaryBytesPerElement + AlignUp(groupRows) * weightCacheBytesPerElement;
 ```
 
 UB 布局：
 
 ```text
 xLocal      [groupRows, innerSizeAligned]
-weightVec   [groupRows, innerSizeAligned]
+weightBuf   [AlignUp(groupRows, 32 / sizeof(T))]
 pos/neg/y   [groupRows, innerSizeAligned]
 ```
 
@@ -306,12 +307,12 @@ computeLen = currentRows * innerSizeAligned;
 
 ```cpp
 CopyInSmallLRows(startRow, currentRows);
-BuildSmallLWeightVec(startRow, currentRows);
-ComputeNc(computeLen);
+CopySmallLWeights(startRow, currentRows);
+ComputeSmallLMultiRow(computeLen, currentRows);
 CopyOutSmallLRows(startRow, currentRows);
 ```
 
-`CopyInSmallLRows` 和 `CopyOutSmallLRows` 当前使用 row 循环版 `DataCopyPad`，语义为 GM `[rows, L]` 与 UB `[rows, innerSizeAligned]` 之间拷贝。`BuildSmallLWeightVec` 在 UB 中为每个 row slot 填充对应 `weight[c]`，计算使用 `Mul(neg, neg, weightVec, computeLen)` 支持不同 channel weight。
+`CopyInSmallLRows` 和 `CopyOutSmallLRows` 当前使用 row 循环版 `DataCopyPad`，语义为 GM `[rows, L]` 与 UB `[rows, innerSizeAligned]` 之间拷贝。`CopySmallLWeights` 对连续 channel group 直接用一次 `DataCopyPad` 搬运 `weight[c:c+rows]`；若 group 跨 N 边界则退化为少量标量填充。`ComputeSmallLMultiRow` 先对整个 group 做 `Maxs/Mins`，然后按 row 使用对应 weight 做分段 `Muls`，避免把 weight 展开成 `[groupRows, innerSizeAligned]`。
 
 ## 5. 测试覆盖
 

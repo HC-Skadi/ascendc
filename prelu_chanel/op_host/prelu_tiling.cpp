@@ -308,7 +308,9 @@ static ge::graphStatus CalcTiling(
             rowNumU64 >= coreLimit) {
             uint64_t groupRows = std::min(SMALL_L_MULTI_ROW_GROUP_ROWS, rowNumU64);
             uint64_t groupElements = groupRows * innerSizeAligned;
-            uint64_t groupBytes = groupElements * GetNcWeightReuseBufferBytesPerElement(dataType);
+            uint64_t alignedGroupRows = AlignUp(groupRows, blockElementNum);
+            uint64_t groupBytes = groupElements * GetBufferBytesPerElement(dataType) +
+                alignedGroupRows * GetNcWeightCacheBytesPerElement(dataType, typeLength);
             uint64_t groupNum = CeilDiv(rowNumU64, groupRows);
             uint64_t finalCoreNum = std::min(coreLimit, groupNum);
             if (groupBytes <= usableUbSize && finalCoreNum > 0) {
