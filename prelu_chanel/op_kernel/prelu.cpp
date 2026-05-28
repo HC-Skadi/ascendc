@@ -27,6 +27,9 @@ __global__ __aicore__ void prelu(GM_ADDR x, GM_ADDR weight, GM_ADDR y, GM_ADDR w
     } else if constexpr (schMode == PRELU_TPL_CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_MODE) {
         op.InitChannelNcSplitCWeightReuse(x, weight, y, &tilingData, &pipe);
         op.ProcessChannelNcSplitCWeightReuse();
+    } else if constexpr (schMode == PRELU_TPL_CHANNEL_SMALL_L_MULTI_ROW_MODE) {
+        op.InitChannelSmallLMultiRow(x, weight, y, &tilingData, &pipe);
+        op.ProcessChannelSmallLMultiRow();
     } else if constexpr (schMode == PRELU_TPL_CHANNEL_SPLIT_L_MODE) {
         op.InitChannel(x, weight, y, &tilingData, &pipe);
         op.ProcessChannelSplitL();

@@ -60,6 +60,10 @@ struct PreluTilingData {
     int64_t tilesPerRow = 0;
     int64_t baseTasks = 0;
     int64_t extraTasks = 0;
+    int64_t groupRows = 0;
+    int64_t groupNum = 0;
+    int64_t baseGroups = 0;
+    int64_t extraGroups = 0;
 };
 ```
 
@@ -73,6 +77,7 @@ TilingKey：
 | 3 | channel split-L parallel | `N*C` 很小、L 很大 | task 为 `(rowIdx, tileIdx)` |
 | 4 | NC / small-L weight reuse | `L == 1`，或 `L <= 64 && C >= 32` 且整行 `C*L` 可放入 UB | 缓存整条 C 维 weight，按 N row 处理 |
 | 5 | NC / small/medium-L split-C weight reuse | 整行 `C*L` 放不进 UB，但 C 分块可放入 UB | task 为 `(nIdx, cTileIdx)` |
+| 6 | channel small-L multi-row | `L > 1`，`AlignUp(L) <= 128`，`N*C >= coreNum` | task 为连续多个 channel row |
 
 ## 3. Host 侧 Tiling 策略
 
@@ -150,6 +155,35 @@ extraRows = N % usedCoreNum;
 
 该路径避免 full-L 把大 C、小 L 输入拆成大量 `(n,c)` 小 row。
 
+### Channel Small-L Multi-Row
+
+当整行 `C * L` 放不进 UB，但 `L` 较小且 `N*C` 足够提供并行度时，优先使用 multi-row full-L 路径，避免普通 full-L 每个 `(n,c)` row 只处理几十个元素。
+
+当前固定：
+
+```cpp
+groupRows = 16;
+innerSizeAligned = AlignUp(L, 32 / sizeof(T));
+groupNum = CeilDiv(N * C, groupRows);
+usedCoreNum = min(coreLimit, groupNum);
+baseGroups = groupNum / usedCoreNum;
+extraGroups = groupNum % usedCoreNum;
+tileLength = groupRows * innerSizeAligned;
+```
+
+UB 布局：
+
+```text
+xLocal      [groupRows, innerSizeAligned]
+weightVec   [groupRows, innerSizeAligned]
+pos/neg/y   [groupRows, innerSizeAligned]
+```
+
+示例：
+
+- `[1, 2048, 7]`，float32：`innerSizeAligned=8`，`groupNum=128`，`usedCoreNum=40`
+- `[1, 2048, 7, 7]`，float32：`innerSizeAligned=56`，`groupNum=128`，`usedCoreNum=40`
+
 ### NC / Small-Medium-L Split-C Weight Reuse
 
 当 `L <= 64 && C >= 32`，但整行 `C * L` 放不进 UB 时，尝试按 C 分块。
@@ -178,7 +212,7 @@ usedCoreNum = min(coreLimit, totalTaskNum);
 usedCoreNum >= min(coreLimit, 10)
 ```
 
-若 C 分块 task 数不足，则回退到常规 channel full/split 路径，让 `(n,c)` row 维度提供更多并行度。
+若未命中 small-L multi-row，且 C 分块 task 数不足，则回退到常规 channel full/split 路径，让 `(n,c)` row 维度提供更多并行度。
 
 写入 tiling：
 
@@ -190,12 +224,7 @@ baseTasks = totalTaskNum / usedCoreNum;
 extraTasks = totalTaskNum % usedCoreNum;
 ```
 
-示例：
-
-- `[1, 2048, 7]`，float32，256KB UB：split-C 只能切出 2 个 task，低于 10 核收益门槛，回退到 channel full-L，`usedCoreNum=40`
-- `[1, 2048, 7, 7]`，即 `L=49`：`splitCTileChannels=184`，`tilesPerRow=12`，`usedCoreNum=12`，进入 split-C
-
-这比 full-L 的 `N*C=2048` 个小 row 分到 40 个核更适合该场景。
+对 `[1, 2048, 7]` 和 `[1, 2048, 7, 7]`，当前会优先选择 small-L multi-row，而不是 split-C。
 
 ## 4. Kernel 端实现
 
@@ -263,6 +292,27 @@ CopyOutByOffset(gmOffset, realLen);
 
 最后一个 C 分块可能不足 `cTileChannels`，用 `DataCopyPad` 补齐计算，CopyOut 只写真实 `realLen`。
 
+### Small-L Multi-Row
+
+每个 group 处理连续 channel row：
+
+```cpp
+startRow = groupIdx * groupRows;
+currentRows = min(groupRows, rowNum - startRow);
+computeLen = currentRows * innerSizeAligned;
+```
+
+处理流程：
+
+```cpp
+CopyInSmallLRows(startRow, currentRows);
+BuildSmallLWeightVec(startRow, currentRows);
+ComputeNc(computeLen);
+CopyOutSmallLRows(startRow, currentRows);
+```
+
+`CopyInSmallLRows` 和 `CopyOutSmallLRows` 当前使用 row 循环版 `DataCopyPad`，语义为 GM `[rows, L]` 与 UB `[rows, innerSizeAligned]` 之间拷贝。`BuildSmallLWeightVec` 在 UB 中为每个 row slot 填充对应 `weight[c]`，计算使用 `Mul(neg, neg, weightVec, computeLen)` 支持不同 channel weight。
+
 ## 5. 测试覆盖
 
 Host tiling UT 覆盖：
@@ -271,8 +321,8 @@ Host tiling UT 覆盖：
 - channel full-L：`[2,3,5]`
 - NC row weight reuse：`[64,3]`
 - small-L row weight reuse：`[8,128,4]`
-- small-L split-C 收益不足 fallback：`[1,2048,7]`
-- medium-L split-C weight reuse：`[1,2048,7,7]`
+- small-L multi-row：`[1,2048,7]`
+- medium-L multi-row：`[1,2048,7,7]`
 - NC split-C weight reuse：`[1,70000]`
 - channel split-L / split-L parallel：大 L case
 
@@ -284,6 +334,7 @@ Kernel UT 覆盖：
 - small-L row weight reuse
 - NC split-C weight reuse
 - small-L split-C weight reuse
+- small-L multi-row
 - split-L / split-L parallel
 
 ## 6. 当前限制

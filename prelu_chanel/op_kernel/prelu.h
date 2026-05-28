@@ -51,27 +51,34 @@ public:
         GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe);
     __aicore__ inline void InitChannelNcSplitCWeightReuse(
         GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe);
+    __aicore__ inline void InitChannelSmallLMultiRow(
+        GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe);
     __aicore__ inline void ProcessScalar();
     __aicore__ inline void ProcessChannelFullL();
     __aicore__ inline void ProcessChannelSplitL();
     __aicore__ inline void ProcessChannelSplitLParallel();
     __aicore__ inline void ProcessChannelNcWeightReuse();
     __aicore__ inline void ProcessChannelNcSplitCWeightReuse();
+    __aicore__ inline void ProcessChannelSmallLMultiRow();
 
 private:
     __aicore__ inline void CopyIn(int64_t progress, uint32_t currentNum);
     __aicore__ inline void CopyInByOffset(int64_t gmOffset, uint32_t currentNum, uint32_t alignedNum);
     __aicore__ inline void CopyInNcByRows(int64_t nOffset, int64_t tileRows);
+    __aicore__ inline void CopyInSmallLRows(int64_t startRow, int64_t currentRows);
     __aicore__ inline void CopyOut(int64_t progress, uint32_t currentNum);
     __aicore__ inline void CopyOutByOffset(int64_t gmOffset, uint32_t currentNum);
     __aicore__ inline void CopyOutNcByRows(int64_t nOffset, int64_t tileRows);
+    __aicore__ inline void CopyOutSmallLRows(int64_t startRow, int64_t currentRows);
     __aicore__ inline void Compute(uint32_t currentNum);
     __aicore__ inline void ComputeNc(uint32_t computeLen);
     __aicore__ inline void BuildNcWeightVec(int64_t tileRows);
+    __aicore__ inline void BuildSmallLWeightVec(int64_t startRow, int64_t currentRows);
     __aicore__ inline void CopyWeightTile(int64_t cOffset, uint32_t realC, uint32_t alignedC);
     __aicore__ inline void LoadChannelWeight(int64_t channelIdx);
     __aicore__ inline void InitBuffers();
     __aicore__ inline void InitNcBuffers();
+    __aicore__ inline void InitSmallLBuffers();
 
 private:
     TPipe* pipe_ = nullptr;
@@ -90,6 +97,7 @@ private:
     GM_ADDR weightGM = nullptr;
     T weightVal;
     float weightValFp32 = 0.0f;
+    int64_t totalLength = 0;
     int64_t blockLength = 0;
     int64_t ubLength = 0;
     int64_t channelSize = 1;
@@ -105,6 +113,9 @@ private:
     int64_t alignedWeightSize = 1;
     int64_t activeChannelSize = 1;
     int64_t rowsPerTile = 1;
+    int64_t groupRows = 1;
+    int64_t groupOffset = 0;
+    int64_t groupCount = 0;
 };
 
 __aicore__ inline float LoadBf16ScalarAsFloat(GM_ADDR weight)
@@ -154,6 +165,23 @@ __aicore__ inline void Prelu<T>::InitNcBuffers()
 }
 
 template <typename T>
+__aicore__ inline void Prelu<T>::InitSmallLBuffers()
+{
+    pipe_->InitBuffer(inputQueueX, BUFFER_NUM, ubLength * sizeof(T));
+    pipe_->InitBuffer(outputQueueY, BUFFER_NUM, ubLength * sizeof(T));
+    if constexpr (std::is_same_v<T, bfloat16_t>) {
+        pipe_->InitBuffer(tmpXFp32, ubLength * sizeof(float));
+        pipe_->InitBuffer(tmpBufPos, ubLength * sizeof(float));
+        pipe_->InitBuffer(tmpBufNeg, ubLength * sizeof(float));
+        pipe_->InitBuffer(weightVecBuf, ubLength * sizeof(float));
+    } else {
+        pipe_->InitBuffer(tmpBufPos, ubLength * sizeof(T));
+        pipe_->InitBuffer(tmpBufNeg, ubLength * sizeof(T));
+        pipe_->InitBuffer(weightVecBuf, ubLength * sizeof(T));
+    }
+}
+
+template <typename T>
 __aicore__ inline void Prelu<T>::InitScalar(
     GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe)
 {
@@ -192,6 +220,7 @@ __aicore__ inline void Prelu<T>::InitChannel(
     channelSize = tilingData->channelSize;
     innerSize = tilingData->innerSize;
     innerSizeAligned = tilingData->innerSizeAligned;
+    totalLength = tilingData->totalLength;
     weightGM = weight;
 
     if (blockIdx < tilingData->extraRows) {
@@ -322,6 +351,40 @@ __aicore__ inline void Prelu<T>::InitChannelNcSplitCWeightReuse(
 }
 
 template <typename T>
+__aicore__ inline void Prelu<T>::InitChannelSmallLMultiRow(
+    GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe)
+{
+    pipe_ = pipe;
+    int64_t blockIdx = GetBlockIdx();
+    channelSize = tilingData->channelSize;
+    innerSize = tilingData->innerSize;
+    innerSizeAligned = tilingData->innerSizeAligned;
+    totalLength = tilingData->totalLength;
+    groupRows = tilingData->groupRows;
+    ubLength = groupRows * innerSizeAligned;
+    alignedChannelSize = innerSizeAligned;
+    alignedWeightSize = ubLength;
+    weightGM = weight;
+
+    if (blockIdx < tilingData->extraGroups) {
+        groupCount = tilingData->baseGroups + 1;
+        groupOffset = blockIdx * (tilingData->baseGroups + 1);
+    } else if (blockIdx < tilingData->usedCoreNum) {
+        groupCount = tilingData->baseGroups;
+        groupOffset = tilingData->extraGroups * (tilingData->baseGroups + 1) +
+                      (blockIdx - tilingData->extraGroups) * tilingData->baseGroups;
+    } else {
+        groupCount = 0;
+        groupOffset = 0;
+    }
+
+    inputGMX.SetGlobalBuffer((__gm__ T*)x, tilingData->totalLength);
+    outputGMY.SetGlobalBuffer((__gm__ T*)y, tilingData->totalLength);
+
+    InitSmallLBuffers();
+}
+
+template <typename T>
 __aicore__ inline void Prelu<T>::CopyIn(int64_t progress, uint32_t currentNum)
 {
     LocalTensor<T> xLocal = inputQueueX.AllocTensor<T>();
@@ -351,6 +414,19 @@ __aicore__ inline void Prelu<T>::CopyInNcByRows(int64_t nOffset, int64_t tileRow
 }
 
 template <typename T>
+__aicore__ inline void Prelu<T>::CopyInSmallLRows(int64_t startRow, int64_t currentRows)
+{
+    LocalTensor<T> xLocal = inputQueueX.AllocTensor<T>();
+    for (int64_t row = 0; row < currentRows; ++row) {
+        int64_t gmOffset = (startRow + row) * innerSize;
+        int64_t localOffset = row * innerSizeAligned;
+        CopyGmToLocalPad(xLocal[localOffset], inputGMX[gmOffset], static_cast<uint32_t>(innerSize),
+            static_cast<uint32_t>(innerSizeAligned));
+    }
+    inputQueueX.EnQue(xLocal);
+}
+
+template <typename T>
 __aicore__ inline void Prelu<T>::CopyOut(int64_t progress, uint32_t currentNum)
 {
     LocalTensor<T> yLocal = outputQueueY.DeQue<T>();
@@ -374,6 +450,18 @@ __aicore__ inline void Prelu<T>::CopyOutNcByRows(int64_t nOffset, int64_t tileRo
         int64_t gmOffset = (nOffset + row) * channelSize * innerSize;
         int64_t localOffset = row * alignedChannelSize;
         CopyLocalToGmPad(outputGMY[gmOffset], yLocal[localOffset], static_cast<uint32_t>(channelSize * innerSize));
+    }
+    outputQueueY.FreeTensor(yLocal);
+}
+
+template <typename T>
+__aicore__ inline void Prelu<T>::CopyOutSmallLRows(int64_t startRow, int64_t currentRows)
+{
+    LocalTensor<T> yLocal = outputQueueY.DeQue<T>();
+    for (int64_t row = 0; row < currentRows; ++row) {
+        int64_t gmOffset = (startRow + row) * innerSize;
+        int64_t localOffset = row * innerSizeAligned;
+        CopyLocalToGmPad(outputGMY[gmOffset], yLocal[localOffset], static_cast<uint32_t>(innerSize));
     }
     outputQueueY.FreeTensor(yLocal);
 }
@@ -427,7 +515,7 @@ __aicore__ inline void Prelu<T>::BuildNcWeightVec(int64_t tileRows)
                 }
                 localOffset += innerSize;
             }
-            for (int64_t padIdx = channelSize * innerSize; padIdx < alignedChannelSize; ++padIdx) {
+            for (int64_t padIdx = activeChannelSize * innerSize; padIdx < alignedChannelSize; ++padIdx) {
                 weightVec.SetValue(padIdx, 0.0f);
             }
             for (int64_t row = 1; row < tileRows; ++row) {
@@ -451,11 +539,38 @@ __aicore__ inline void Prelu<T>::BuildNcWeightVec(int64_t tileRows)
                 }
                 localOffset += innerSize;
             }
-            for (int64_t padIdx = channelSize * innerSize; padIdx < alignedChannelSize; ++padIdx) {
+            for (int64_t padIdx = activeChannelSize * innerSize; padIdx < alignedChannelSize; ++padIdx) {
                 weightVec.SetValue(padIdx, static_cast<T>(0));
             }
             for (int64_t row = 1; row < tileRows; ++row) {
                 DataCopy(weightVec[row * alignedChannelSize], weightVec, static_cast<uint32_t>(alignedChannelSize));
+            }
+        }
+    }
+    PipeBarrier<PIPE_ALL>();
+}
+
+template <typename T>
+__aicore__ inline void Prelu<T>::BuildSmallLWeightVec(int64_t startRow, int64_t currentRows)
+{
+    if constexpr (std::is_same_v<T, bfloat16_t>) {
+        LocalTensor<float> weightVec = weightVecBuf.Get<float>();
+        for (int64_t row = 0; row < currentRows; ++row) {
+            int64_t channelIdx = (startRow + row) % channelSize;
+            float weightValue = LoadBf16ScalarAsFloat((GM_ADDR)((__gm__ T*)weightGM + channelIdx));
+            int64_t localOffset = row * innerSizeAligned;
+            for (int64_t innerIdx = 0; innerIdx < innerSizeAligned; ++innerIdx) {
+                weightVec.SetValue(localOffset + innerIdx, weightValue);
+            }
+        }
+    } else {
+        LocalTensor<T> weightVec = weightVecBuf.Get<T>();
+        for (int64_t row = 0; row < currentRows; ++row) {
+            int64_t channelIdx = (startRow + row) % channelSize;
+            T weightValue = *((__gm__ T*)weightGM + channelIdx);
+            int64_t localOffset = row * innerSizeAligned;
+            for (int64_t innerIdx = 0; innerIdx < innerSizeAligned; ++innerIdx) {
+                weightVec.SetValue(localOffset + innerIdx, weightValue);
             }
         }
     }
@@ -634,6 +749,27 @@ __aicore__ inline void Prelu<T>::ProcessChannelNcSplitCWeightReuse()
         BuildNcWeightVec(1);
         ComputeNc(computeLen);
         CopyOutByOffset(gmOffset, realLen);
+    }
+}
+
+template <typename T>
+__aicore__ inline void Prelu<T>::ProcessChannelSmallLMultiRow()
+{
+    int64_t rowNum = (channelSize == 0) ? 0 : totalLength / innerSize;
+    for (int64_t groupProgress = 0; groupProgress < groupCount; ++groupProgress) {
+        int64_t groupIdx = groupOffset + groupProgress;
+        int64_t startRow = groupIdx * groupRows;
+        int64_t remainRows = rowNum - startRow;
+        int64_t currentRows = remainRows > groupRows ? groupRows : remainRows;
+        if (currentRows <= 0) {
+            continue;
+        }
+        uint32_t computeLen = static_cast<uint32_t>(currentRows * innerSizeAligned);
+
+        CopyInSmallLRows(startRow, currentRows);
+        BuildSmallLWeightVec(startRow, currentRows);
+        ComputeNc(computeLen);
+        CopyOutSmallLRows(startRow, currentRows);
     }
 }
 
