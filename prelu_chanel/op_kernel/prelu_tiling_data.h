@@ -21,7 +21,7 @@ struct PreluTilingData {
     int64_t innerSizeAligned = 1;  // AlignUp(L, 32 / sizeof(T))
     int64_t baseRows = 0;          // channel路径每核基础row数
     int64_t extraRows = 0;         // channel路径前extraRows个核各多处理1个row
-    int64_t tilesPerRow = 0;       // split-L parallel路径每个row的L维tile数
+    int64_t tilesPerRow = 0;       // 分支复用：split-L的L维tile数 / NCL的tileN / split-C的C维tile数
     int64_t baseTasks = 0;         // split-L parallel路径每核基础task数
     int64_t extraTasks = 0;        // split-L parallel路径前extraTasks个核各多处理1个task
 };
