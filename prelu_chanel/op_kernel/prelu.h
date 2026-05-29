@@ -18,6 +18,7 @@ namespace NsPrelu {
 using namespace AscendC;
 
 constexpr int32_t BUFFER_NUM = 2;
+constexpr int32_t MAX_COPY_BLOCK_COUNT = 4095;
 
 template <typename T>
 __aicore__ inline void CopyGmToLocalPad(
@@ -387,10 +388,15 @@ __aicore__ inline void Prelu<T>::CopyInNcByRowsInnerStride(int64_t nOffset, int6
     for (int64_t row = 0; row < tileRows; ++row) {
         int64_t gmRowOffset = (nOffset + row) * channelSize * innerSize;
         int64_t localRowOffset = row * alignedChannelSize;
-        for (int64_t channelIdx = 0; channelIdx < channelSize; ++channelIdx) {
-            CopyGmToLocalPad(xLocal[localRowOffset + channelIdx * innerStride],
-                inputGMX[gmRowOffset + channelIdx * innerSize], static_cast<uint32_t>(innerSize),
-                static_cast<uint32_t>(innerStride));
+        for (int64_t channelOffset = 0; channelOffset < channelSize; channelOffset += MAX_COPY_BLOCK_COUNT) {
+            uint16_t blockCount = static_cast<uint16_t>(
+                (channelSize - channelOffset) > MAX_COPY_BLOCK_COUNT ? MAX_COPY_BLOCK_COUNT :
+                                                                        (channelSize - channelOffset));
+            DataCopyExtParams copyParams{blockCount, static_cast<uint32_t>(innerSize * sizeof(T)), 0, 0, 0};
+            DataCopyPadExtParams<T> padParams{innerStride != innerSize, 0,
+                static_cast<uint8_t>(innerStride - innerSize), static_cast<T>(0)};
+            DataCopyPad(xLocal[localRowOffset + channelOffset * innerStride],
+                inputGMX[gmRowOffset + channelOffset * innerSize], copyParams, padParams);
         }
     }
     inputQueueX.EnQue(xLocal);
@@ -431,9 +437,13 @@ __aicore__ inline void Prelu<T>::CopyOutNcByRowsInnerStride(int64_t nOffset, int
     for (int64_t row = 0; row < tileRows; ++row) {
         int64_t gmRowOffset = (nOffset + row) * channelSize * innerSize;
         int64_t localRowOffset = row * alignedChannelSize;
-        for (int64_t channelIdx = 0; channelIdx < channelSize; ++channelIdx) {
-            CopyLocalToGmPad(outputGMY[gmRowOffset + channelIdx * innerSize],
-                yLocal[localRowOffset + channelIdx * innerStride], static_cast<uint32_t>(innerSize));
+        for (int64_t channelOffset = 0; channelOffset < channelSize; channelOffset += MAX_COPY_BLOCK_COUNT) {
+            uint16_t blockCount = static_cast<uint16_t>(
+                (channelSize - channelOffset) > MAX_COPY_BLOCK_COUNT ? MAX_COPY_BLOCK_COUNT :
+                                                                        (channelSize - channelOffset));
+            DataCopyExtParams copyParams{blockCount, static_cast<uint32_t>(innerSize * sizeof(T)), 0, 0, 0};
+            DataCopyPad(outputGMY[gmRowOffset + channelOffset * innerSize],
+                yLocal[localRowOffset + channelOffset * innerStride], copyParams);
         }
     }
     outputQueueY.FreeTensor(yLocal);

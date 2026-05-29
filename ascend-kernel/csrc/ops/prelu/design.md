@@ -239,7 +239,7 @@ for (channelIdx = 0; channelIdx < C; ++channelIdx) {
 }
 ```
 
-CopyIn/CopyOut 按 channel 使用 pad 搬运，只读写真实 `L`，padding 只留在 UB 内参与计算。然后用 UB 内 `DataCopy` 把第一行 pattern 复制到后续 N row，避免 `tileRows * C * innerStride` 次逐元素 `SetValue`。key4 和 key7 在 kernel 入口处已拆分，热路径不再按 `innerSize` 做运行时分支。
+CopyIn/CopyOut 以 channel 为 block，使用 `DataCopyPad` 的 `blockCount` 批量搬运整行，只读写真实 `L`，padding 只留在 UB 内参与计算。然后用 UB 内 `DataCopy` 把第一行 pattern 复制到后续 N row，避免 `tileRows * C * innerStride` 次逐元素 `SetValue`，也避免逐 channel 下发大量小 DMA。key4 和 key7 在 kernel 入口处已拆分，热路径不再按 `innerSize` 做运行时分支。
 
 ### Split-C Weight Reuse
 
