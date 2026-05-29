@@ -128,8 +128,7 @@ Host 计算：
 
 ```cpp
 rowElements = C * L;
-innerStride = (L == 1) ? 1 : AlignUp(L, 32 / sizeof(T));
-alignedRowElements = (L == 1) ? AlignUp(rowElements, 32 / sizeof(T)) : C * innerStride;
+alignedRowElements = AlignUp(rowElements, 32 / sizeof(T));
 alignedChannelSize = AlignUp(C, 32 / sizeof(T));
 weightCacheBytes = alignedChannelSize * sizeof(T);
 if (dtype == bfloat16) {
@@ -223,23 +222,25 @@ Cast(yLocal, pos, CAST_RINT, len);
 
 Init 阶段把 `weight[0:C]` 搬到 UB。key4 的 `L == 1` 路径直接把 cached weight 复制到每个 N row 的 `weightVec`。
 
-key7 的 `L > 1` 路径使用 per-channel stride UB 布局：
+key7 的 `L > 1` 路径使用连续 UB 布局：
 
 ```text
 GM: [c0 L][c1 L][c2 L]...
-UB: [c0 innerStride][c1 innerStride][c2 innerStride]...
+UB: [c0 L][c1 L][c2 L]...[row tail padding]
 ```
 
-先构造第一行 `C * innerStride` weight pattern：
+先构造第一行 `AlignUp(C * L, 32 / sizeof(T))` weight pattern：
 
 ```cpp
+offset = 0;
 for (channelIdx = 0; channelIdx < C; ++channelIdx) {
     weightValue = weightLocal[channelIdx];
-    FillByDuplicate(weightVec, channelIdx * innerStride, weightValue, innerStride);
+    FillByDuplicate(weightVec, offset, weightValue, L);
+    offset += L;
 }
 ```
 
-CopyIn/CopyOut 以 channel 为 block，使用 `DataCopyPad` 的 `blockCount` 批量搬运整行，只读写真实 `L`，padding 只留在 UB 内参与计算。然后用 UB 内 `DataCopy` 把第一行 pattern 复制到后续 N row，避免 `tileRows * C * innerStride` 次逐元素 `SetValue`，也避免逐 channel 下发大量小 DMA。key4 和 key7 在 kernel 入口处已拆分，热路径不再按 `innerSize` 做运行时分支。
+CopyIn/CopyOut 使用 `DataCopyPad` 的 `blockCount` 按多行批量连续搬运整行，只在 row 尾部 padding。然后用 UB 内 `DataCopy` 把第一行 pattern 复制到后续 N row，避免 `tileRows * C * L` 次逐元素 `SetValue`，也避免逐 channel 下发大量小 DMA。key4 和 key7 在 kernel 入口处已拆分，热路径不再按 `innerSize` 做运行时分支。
 
 ### Split-C Weight Reuse
 

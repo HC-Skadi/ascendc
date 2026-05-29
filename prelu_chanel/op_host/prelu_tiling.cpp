@@ -281,10 +281,8 @@ static ge::graphStatus CalcTiling(
                 std::numeric_limits<uint64_t>::max() / static_cast<uint64_t>(innerSize),
             OP_LOGE(context, "Prelu: C*L exceeds uint64 range"),
             return ge::GRAPH_FAILED);
-        uint64_t innerStride = innerSize == 1 ? 1U : AlignUp(static_cast<uint64_t>(innerSize), blockElementNum);
         uint64_t rowElements = static_cast<uint64_t>(channelSize) * static_cast<uint64_t>(innerSize);
-        uint64_t alignedRowElements = innerSize == 1 ? AlignUp(rowElements, blockElementNum) :
-            static_cast<uint64_t>(channelSize) * innerStride;
+        uint64_t alignedRowElements = AlignUp(rowElements, blockElementNum);
         uint64_t alignedChannelSize = AlignUp(static_cast<uint64_t>(channelSize), blockElementNum);
         uint64_t weightCacheBytesPerElement = GetNcWeightCacheBytesPerElement(dataType, typeLength);
         bool weightCacheSizeValid = alignedChannelSize <=
