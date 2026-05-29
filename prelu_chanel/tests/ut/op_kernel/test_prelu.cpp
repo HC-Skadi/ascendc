@@ -284,7 +284,7 @@ TEST_F(PreluKernelTest, test_channel_small_l_weight_reuse_run)
     constexpr size_t n = 3;
     constexpr size_t c = 4;
     constexpr size_t l = 3;
-    constexpr size_t rowAlignedSize = 16;
+    constexpr size_t rowAlignedSize = 32;
     constexpr size_t size = n * c * l;
     constexpr size_t tilingDataSize = sizeof(PreluTilingData);
     constexpr uint32_t numBlocks = 1;
@@ -322,10 +322,10 @@ TEST_F(PreluKernelTest, test_channel_small_l_weight_reuse_run)
     tilingData->baseRows = n;
     tilingData->extraRows = 0;
 
-    ICPU_SET_TILING_KEY(PRELU_TPL_CHANNEL_NC_WEIGHT_REUSE_MODE);
+    ICPU_SET_TILING_KEY(PRELU_TPL_CHANNEL_NC_WEIGHT_REUSE_BY_INNER_MODE);
     AscendC::SetKernelMode(KernelMode::AIV_MODE);
 
-    ICPU_RUN_KF((prelu<PRELU_TPL_CHANNEL_NC_WEIGHT_REUSE_MODE>), numBlocks, x, weight, y, workspace, tiling);
+    ICPU_RUN_KF((prelu<PRELU_TPL_CHANNEL_NC_WEIGHT_REUSE_BY_INNER_MODE>), numBlocks, x, weight, y, workspace, tiling);
 
     memcpy(yHost.data(), y, yByteSize);
     for (size_t row = 0; row < n; ++row) {
@@ -589,10 +589,11 @@ TEST_F(PreluKernelTest, test_channel_small_l_split_c_weight_reuse_run)
     tilingData->baseTasks = 1;
     tilingData->extraTasks = 0;
 
-    ICPU_SET_TILING_KEY(PRELU_TPL_CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_MODE);
+    ICPU_SET_TILING_KEY(PRELU_TPL_CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_BY_INNER_MODE);
     AscendC::SetKernelMode(KernelMode::AIV_MODE);
 
-    ICPU_RUN_KF((prelu<PRELU_TPL_CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_MODE>), numBlocks, x, weight, y, workspace, tiling);
+    ICPU_RUN_KF(
+        (prelu<PRELU_TPL_CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_BY_INNER_MODE>), numBlocks, x, weight, y, workspace, tiling);
 
     memcpy(yHost.data(), y, yByteSize);
     for (size_t col = 0; col < c; ++col) {
