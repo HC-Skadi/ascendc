@@ -37,6 +37,19 @@ __aicore__ inline void CopyLocalToGmPad(const GlobalTensor<T>& dst, const LocalT
 }
 
 template <typename T>
+__aicore__ inline void FillByDuplicate(LocalTensor<T> dst, int64_t offset, T value, int64_t count)
+{
+    constexpr uint32_t blockElems = 32U / sizeof(T);
+    int64_t progress = 0;
+    for (; progress + blockElems <= count; progress += blockElems) {
+        Duplicate(dst[offset + progress], value, blockElems);
+    }
+    for (; progress < count; ++progress) {
+        dst.SetValue(offset + progress, value);
+    }
+}
+
+template <typename T>
 class Prelu {
 public:
     __aicore__ inline Prelu() {}
@@ -56,7 +69,9 @@ public:
     __aicore__ inline void ProcessChannelSplitL();
     __aicore__ inline void ProcessChannelSplitLParallel();
     __aicore__ inline void ProcessChannelNcWeightReuse();
+    __aicore__ inline void ProcessChannelNcWeightReuseByInner();
     __aicore__ inline void ProcessChannelNcSplitCWeightReuse();
+    __aicore__ inline void ProcessChannelNcSplitCWeightReuseByInner();
 
 private:
     __aicore__ inline void CopyIn(int64_t progress, uint32_t currentNum);
@@ -67,7 +82,8 @@ private:
     __aicore__ inline void CopyOutNcByRows(int64_t nOffset, int64_t tileRows);
     __aicore__ inline void Compute(uint32_t currentNum);
     __aicore__ inline void ComputeNc(uint32_t computeLen);
-    __aicore__ inline void BuildNcWeightVec(int64_t tileRows);
+    __aicore__ inline void BuildNcWeightVecL1(int64_t tileRows);
+    __aicore__ inline void BuildNcWeightVecByInner(int64_t tileRows);
     __aicore__ inline void CopyWeightTile(int64_t cOffset, uint32_t realC, uint32_t alignedC);
     __aicore__ inline void LoadChannelWeight(int64_t channelIdx);
     __aicore__ inline void InitBuffers();
@@ -410,55 +426,54 @@ __aicore__ inline void Prelu<T>::Compute(uint32_t currentNum)
 }
 
 template <typename T>
-__aicore__ inline void Prelu<T>::BuildNcWeightVec(int64_t tileRows)
+__aicore__ inline void Prelu<T>::BuildNcWeightVecL1(int64_t tileRows)
 {
     if constexpr (std::is_same_v<T, bfloat16_t>) {
         LocalTensor<float> weightLocal = weightFp32Buf.Get<float>();
         LocalTensor<float> weightVec = weightVecBuf.Get<float>();
-        if (innerSize == 1) {
-            for (int64_t row = 0; row < tileRows; ++row) {
-                int64_t rowOffset = row * alignedChannelSize;
-                DataCopy(weightVec[rowOffset], weightLocal, static_cast<uint32_t>(alignedWeightSize));
-            }
-        } else {
-            int64_t localOffset = 0;
-            for (int64_t channelIdx = 0; channelIdx < activeChannelSize; ++channelIdx) {
-                float weightValue = weightLocal.GetValue(channelIdx);
-                for (int64_t innerIdx = 0; innerIdx < innerSize; ++innerIdx) {
-                    weightVec.SetValue(localOffset + innerIdx, weightValue);
-                }
-                localOffset += innerSize;
-            }
-            for (int64_t padIdx = activeChannelSize * innerSize; padIdx < alignedChannelSize; ++padIdx) {
-                weightVec.SetValue(padIdx, 0.0f);
-            }
-            for (int64_t row = 1; row < tileRows; ++row) {
-                DataCopy(weightVec[row * alignedChannelSize], weightVec, static_cast<uint32_t>(alignedChannelSize));
-            }
+        for (int64_t row = 0; row < tileRows; ++row) {
+            int64_t rowOffset = row * alignedChannelSize;
+            DataCopy(weightVec[rowOffset], weightLocal, static_cast<uint32_t>(alignedWeightSize));
         }
     } else {
         LocalTensor<T> weightLocal = weightBuf.Get<T>();
         LocalTensor<T> weightVec = weightVecBuf.Get<T>();
-        if (innerSize == 1) {
-            for (int64_t row = 0; row < tileRows; ++row) {
-                int64_t rowOffset = row * alignedChannelSize;
-                DataCopy(weightVec[rowOffset], weightLocal, static_cast<uint32_t>(alignedWeightSize));
-            }
-        } else {
-            int64_t localOffset = 0;
-            for (int64_t channelIdx = 0; channelIdx < activeChannelSize; ++channelIdx) {
-                T weightValue = weightLocal.GetValue(channelIdx);
-                for (int64_t innerIdx = 0; innerIdx < innerSize; ++innerIdx) {
-                    weightVec.SetValue(localOffset + innerIdx, weightValue);
-                }
-                localOffset += innerSize;
-            }
-            for (int64_t padIdx = activeChannelSize * innerSize; padIdx < alignedChannelSize; ++padIdx) {
-                weightVec.SetValue(padIdx, static_cast<T>(0));
-            }
-            for (int64_t row = 1; row < tileRows; ++row) {
-                DataCopy(weightVec[row * alignedChannelSize], weightVec, static_cast<uint32_t>(alignedChannelSize));
-            }
+        for (int64_t row = 0; row < tileRows; ++row) {
+            int64_t rowOffset = row * alignedChannelSize;
+            DataCopy(weightVec[rowOffset], weightLocal, static_cast<uint32_t>(alignedWeightSize));
+        }
+    }
+    PipeBarrier<PIPE_ALL>();
+}
+
+template <typename T>
+__aicore__ inline void Prelu<T>::BuildNcWeightVecByInner(int64_t tileRows)
+{
+    if constexpr (std::is_same_v<T, bfloat16_t>) {
+        LocalTensor<float> weightLocal = weightFp32Buf.Get<float>();
+        LocalTensor<float> weightVec = weightVecBuf.Get<float>();
+        int64_t localOffset = 0;
+        for (int64_t channelIdx = 0; channelIdx < activeChannelSize; ++channelIdx) {
+            FillByDuplicate(weightVec, localOffset, weightLocal.GetValue(channelIdx), innerSize);
+            localOffset += innerSize;
+        }
+        FillByDuplicate(weightVec, activeChannelSize * innerSize, 0.0f,
+            alignedChannelSize - activeChannelSize * innerSize);
+        for (int64_t row = 1; row < tileRows; ++row) {
+            DataCopy(weightVec[row * alignedChannelSize], weightVec, static_cast<uint32_t>(alignedChannelSize));
+        }
+    } else {
+        LocalTensor<T> weightLocal = weightBuf.Get<T>();
+        LocalTensor<T> weightVec = weightVecBuf.Get<T>();
+        int64_t localOffset = 0;
+        for (int64_t channelIdx = 0; channelIdx < activeChannelSize; ++channelIdx) {
+            FillByDuplicate(weightVec, localOffset, weightLocal.GetValue(channelIdx), innerSize);
+            localOffset += innerSize;
+        }
+        FillByDuplicate(weightVec, activeChannelSize * innerSize, static_cast<T>(0),
+            alignedChannelSize - activeChannelSize * innerSize);
+        for (int64_t row = 1; row < tileRows; ++row) {
+            DataCopy(weightVec[row * alignedChannelSize], weightVec, static_cast<uint32_t>(alignedChannelSize));
         }
     }
     PipeBarrier<PIPE_ALL>();
@@ -603,7 +618,26 @@ __aicore__ inline void Prelu<T>::ProcessChannelNcWeightReuse()
     if (blockRowNum <= 0) {
         return;
     }
-    BuildNcWeightVec(rowsPerTile);
+    BuildNcWeightVecL1(rowsPerTile);
+    for (int64_t rowProgress = 0; rowProgress < blockRowNum; rowProgress += rowsPerTile) {
+        int64_t tileRows = blockRowNum - rowProgress;
+        tileRows = tileRows > rowsPerTile ? rowsPerTile : tileRows;
+        uint32_t computeLen = static_cast<uint32_t>(tileRows * alignedChannelSize);
+        int64_t nOffset = rowOffset + rowProgress;
+
+        CopyInNcByRows(nOffset, tileRows);
+        ComputeNc(computeLen);
+        CopyOutNcByRows(nOffset, tileRows);
+    }
+}
+
+template <typename T>
+__aicore__ inline void Prelu<T>::ProcessChannelNcWeightReuseByInner()
+{
+    if (blockRowNum <= 0) {
+        return;
+    }
+    BuildNcWeightVecByInner(rowsPerTile);
     for (int64_t rowProgress = 0; rowProgress < blockRowNum; rowProgress += rowsPerTile) {
         int64_t tileRows = blockRowNum - rowProgress;
         tileRows = tileRows > rowsPerTile ? rowsPerTile : tileRows;
@@ -619,24 +653,45 @@ __aicore__ inline void Prelu<T>::ProcessChannelNcWeightReuse()
 template <typename T>
 __aicore__ inline void Prelu<T>::ProcessChannelNcSplitCWeightReuse()
 {
+    for (int64_t taskProgress = 0; taskProgress < taskNum; ++taskProgress) {
+        int64_t taskIdx = taskOffset + taskProgress;
+        int64_t nIdx = taskIdx / tilesPerRow;
+        int64_t cTileIdx = taskIdx % tilesPerRow;
+        int64_t cTileChannels = alignedChannelSize;
+        int64_t cOffset = cTileIdx * cTileChannels;
+        int64_t remainC = channelSize - cOffset;
+        uint32_t realC = static_cast<uint32_t>(remainC > cTileChannels ? cTileChannels : remainC);
+        uint32_t computeLen = static_cast<uint32_t>(alignedChannelSize);
+        int64_t gmOffset = nIdx * channelSize + cOffset;
+
+        CopyWeightTile(cOffset, realC, computeLen);
+        CopyInByOffset(gmOffset, realC, computeLen);
+        BuildNcWeightVecL1(1);
+        ComputeNc(computeLen);
+        CopyOutByOffset(gmOffset, realC);
+    }
+}
+
+template <typename T>
+__aicore__ inline void Prelu<T>::ProcessChannelNcSplitCWeightReuseByInner()
+{
     uint32_t alignElements = static_cast<uint32_t>(32U / sizeof(T));
     for (int64_t taskProgress = 0; taskProgress < taskNum; ++taskProgress) {
         int64_t taskIdx = taskOffset + taskProgress;
         int64_t nIdx = taskIdx / tilesPerRow;
         int64_t cTileIdx = taskIdx % tilesPerRow;
-        int64_t cTileChannels = innerSize == 1 ? alignedChannelSize : cTileLength;
+        int64_t cTileChannels = cTileLength;
         int64_t cOffset = cTileIdx * cTileChannels;
         int64_t remainC = channelSize - cOffset;
         uint32_t realC = static_cast<uint32_t>(remainC > cTileChannels ? cTileChannels : remainC);
         uint32_t realLen = static_cast<uint32_t>(realC * innerSize);
-        uint32_t computeLen = innerSize == 1 ? static_cast<uint32_t>(alignedChannelSize) :
-            AlignUp(realLen, alignElements);
-        uint32_t weightLen = innerSize == 1 ? computeLen : AlignUp(realC, alignElements);
+        uint32_t computeLen = AlignUp(realLen, alignElements);
+        uint32_t weightLen = AlignUp(realC, alignElements);
         int64_t gmOffset = nIdx * channelSize * innerSize + cOffset * innerSize;
 
         CopyWeightTile(cOffset, realC, weightLen);
         CopyInByOffset(gmOffset, realLen, computeLen);
-        BuildNcWeightVec(1);
+        BuildNcWeightVecByInner(1);
         ComputeNc(computeLen);
         CopyOutByOffset(gmOffset, realLen);
     }
