@@ -29,7 +29,7 @@ constexpr uint64_t NCL_CONTIGUOUS_MIN_CHANNEL_SIZE = 64U;
 constexpr uint64_t NCL_CONTIGUOUS_MIN_CORE_NUM = 31U;
 constexpr uint64_t LARGE_C_WEIGHT_REUSE_MIN_CHANNEL_SIZE = 32U;
 constexpr uint64_t MIN_SPLIT_C_WEIGHT_REUSE_CORE_NUM = 10U;
-constexpr uint64_t SPLIT_C_WEIGHT_REUSE_BY_INNER_TILE_CHANNELS = 32U;
+constexpr uint64_t MAX_DATA_COPY_BLOCK_COUNT = 4095U;
 
 static ge::graphStatus GetPlatformInfo(gert::TilingContext* context, uint64_t& ubSize, int64_t& coreNum)
 {
@@ -191,6 +191,48 @@ static uint64_t CeilDiv(uint64_t value, uint64_t factor)
 static uint64_t AlignUp(uint64_t value, uint64_t align)
 {
     return CeilDiv(value, align) * align;
+}
+
+static uint64_t AlignDown(uint64_t value, uint64_t align)
+{
+    return (value / align) * align;
+}
+
+static uint64_t ChooseSplitCByInnerTileChannels(
+    uint64_t maxSplitCChannels, uint64_t channelSize, uint64_t batchSize, uint64_t blockElementNum,
+    uint64_t coreLimit)
+{
+    if (batchSize == 0 || blockElementNum == 0) {
+        return 0;
+    }
+
+    uint64_t maxTileChannels = std::min(maxSplitCChannels, MAX_DATA_COPY_BLOCK_COUNT);
+    maxTileChannels = std::min(maxTileChannels, AlignUp(channelSize, blockElementNum));
+    maxTileChannels = AlignDown(maxTileChannels, blockElementNum);
+    if (maxTileChannels < blockElementNum) {
+        return 0;
+    }
+
+    uint64_t cTileNumWithMaxTile = CeilDiv(channelSize, maxTileChannels);
+    uint64_t taskNumWithMaxTile = batchSize > std::numeric_limits<uint64_t>::max() / cTileNumWithMaxTile ?
+        std::numeric_limits<uint64_t>::max() :
+        batchSize * cTileNumWithMaxTile;
+    uint64_t targetTaskNum = std::min(coreLimit, MIN_SPLIT_C_WEIGHT_REUSE_CORE_NUM);
+    if (taskNumWithMaxTile >= targetTaskNum) {
+        return maxTileChannels;
+    }
+
+    uint64_t requiredCTileNum = CeilDiv(targetTaskNum, batchSize);
+    if (requiredCTileNum <= 1) {
+        return maxTileChannels;
+    }
+
+    uint64_t maxTileForParallel = (channelSize - 1U) / (requiredCTileNum - 1U);
+    maxTileForParallel = AlignDown(maxTileForParallel, blockElementNum);
+    if (maxTileForParallel < blockElementNum) {
+        maxTileForParallel = blockElementNum;
+    }
+    return std::min(maxTileChannels, maxTileForParallel);
 }
 
 static ge::graphStatus CalcTiling(
@@ -400,8 +442,8 @@ static ge::graphStatus CalcTiling(
                 weightCacheBytesPerElement +
                 GetBufferBytesPerElement(dataType) * innerSizeAligned;
             uint64_t maxSplitCChannels = usableUbSize / splitCBytesPerChannel;
-            uint64_t splitCTileChannels = (maxSplitCChannels / blockElementNum) * blockElementNum;
-            splitCTileChannels = std::min(splitCTileChannels, SPLIT_C_WEIGHT_REUSE_BY_INNER_TILE_CHANNELS);
+            uint64_t splitCTileChannels = ChooseSplitCByInnerTileChannels(
+                maxSplitCChannels, static_cast<uint64_t>(channelSize), batchSize, blockElementNum, coreLimit);
             if (splitCTileChannels >= blockElementNum) {
                 uint64_t alignedSplitCElements =
                     splitCTileChannels * innerSizeAligned;
