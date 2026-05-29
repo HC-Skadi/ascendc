@@ -71,8 +71,10 @@ TilingKey：
 | 1 | channel full-L | channel，且每个 `(n,c)` row 的 L 可放入 UB | 每个 row 一次处理完整 L |
 | 2 | channel split-L | L 超过 UB，且不适合 task 并行 | row 内按 L 分段 |
 | 3 | channel split-L parallel | `N*C` 很小、L 很大 | task 为 `(rowIdx, tileIdx)` |
-| 4 | NC / small-L weight reuse | `L == 1`，或 `L <= 64 && C >= 32` 且整行 `C*L` 可放入 UB | 缓存整条 C 维 weight，按 N row 处理 |
-| 5 | NC / small/medium-L split-C weight reuse | 整行 `C*L` 放不进 UB，但 C 分块可放入 UB | task 为 `(nIdx, cTileIdx)` |
+| 4 | NC weight reuse | `L == 1`，整行 C 可放入 UB | 缓存整条 C 维 weight，按 N row 处理 |
+| 5 | NC split-C weight reuse | `L == 1`，整行 C 放不进 UB，但 C 分块可放入 UB | task 为 `(nIdx, cTileIdx)` |
+| 6 | NC split-C by-inner weight reuse | `1 < L <= 64`，整行 `C*L` 放不进 UB，但 C 分块可放入 UB | task 为 `(nIdx, cTileIdx)` |
+| 7 | NC by-inner weight reuse | `1 < L <= 64`，且整行 `C*L` 可放入 UB | 缓存整条 C 维 weight，按 N row 处理 |
 
 ## 3. Host 侧 Tiling 策略
 
@@ -117,16 +119,17 @@ innerSizeAligned = AlignUp(L, 32 / sizeof(T));
 
 ### NC / Small-L Row Weight Reuse
 
-该路径用于：
+该路径分成两个 key：
 
-- `L == 1`
-- 或 `L <= 64 && C >= 32`，且整行 `C * L` 可放入 UB
+- key4：`L == 1`，且整行 C 可放入 UB
+- key7：`L <= 64 && C >= 32`，且整行 `C * L` 可放入 UB
 
 Host 计算：
 
 ```cpp
 rowElements = C * L;
-alignedRowElements = AlignUp(rowElements, 32 / sizeof(T));
+innerStride = (L == 1) ? 1 : AlignUp(L, 32 / sizeof(T));
+alignedRowElements = (L == 1) ? AlignUp(rowElements, 32 / sizeof(T)) : C * innerStride;
 alignedChannelSize = AlignUp(C, 32 / sizeof(T));
 weightCacheBytes = alignedChannelSize * sizeof(T);
 if (dtype == bfloat16) {
@@ -190,7 +193,7 @@ baseTasks = totalTaskNum / usedCoreNum;
 extraTasks = totalTaskNum % usedCoreNum;
 ```
 
-对 `[1, 2048, 7]`，split-C task 数不足时回退到 channel full-L；对 `[1, 2048, 7, 7]`，split-C task 数充足时选择 key5。
+对 `[1, 2048, 7]`，split-C task 数不足时回退到 channel full-L；对 `[1, 2048, 7, 7]`，split-C task 数充足时选择 key6。
 
 ## 4. Kernel 端实现
 
@@ -218,20 +221,25 @@ Cast(yLocal, pos, CAST_RINT, len);
 
 ### Row Weight Reuse
 
-Init 阶段把 `weight[0:C]` 搬到 UB。`L == 1` 时，直接把 cached weight 复制到每个 N row 的 `weightVec`。
+Init 阶段把 `weight[0:C]` 搬到 UB。key4 的 `L == 1` 路径直接把 cached weight 复制到每个 N row 的 `weightVec`。
 
-`L > 1` 时，先构造第一行 `C * L` weight pattern：
+key7 的 `L > 1` 路径使用 per-channel stride UB 布局：
+
+```text
+GM: [c0 L][c1 L][c2 L]...
+UB: [c0 innerStride][c1 innerStride][c2 innerStride]...
+```
+
+先构造第一行 `C * innerStride` weight pattern：
 
 ```cpp
 for (channelIdx = 0; channelIdx < C; ++channelIdx) {
     weightValue = weightLocal[channelIdx];
-    for (innerIdx = 0; innerIdx < L; ++innerIdx) {
-        weightVec[channelIdx * L + innerIdx] = weightValue;
-    }
+    FillByDuplicate(weightVec, channelIdx * innerStride, weightValue, innerStride);
 }
 ```
 
-然后用 UB 内 `DataCopy` 把第一行 pattern 复制到后续 N row，避免 `tileRows * C * L` 次逐元素 `SetValue`。
+CopyIn/CopyOut 按 channel 使用 pad 搬运，只读写真实 `L`，padding 只留在 UB 内参与计算。然后用 UB 内 `DataCopy` 把第一行 pattern 复制到后续 N row，避免 `tileRows * C * innerStride` 次逐元素 `SetValue`。key4 和 key7 在 kernel 入口处已拆分，热路径不再按 `innerSize` 做运行时分支。
 
 ### Split-C Weight Reuse
 
@@ -251,7 +259,7 @@ gmOffset = nIdx * C * L + cOffset * L;
 ```cpp
 CopyWeightTile(cOffset, realC, AlignUp(realC, 32 / sizeof(T)));
 CopyInByOffset(gmOffset, realLen, computeLen);
-BuildNcWeightVec(1);
+BuildNcWeightVecByInner(1);
 ComputeNc(computeLen);
 CopyOutByOffset(gmOffset, realLen);
 ```
@@ -265,7 +273,7 @@ Host tiling UT 覆盖：
 - scalar：`[7]`
 - channel full-L：`[2,3,5]`
 - NC row weight reuse：`[64,3]`
-- small-L row weight reuse：`[8,128,4]`
+- small-L row weight reuse by-inner：`[8,128,4]`
 - small-L full-L fallback：`[1,2048,7]`
 - medium-L split-C weight reuse：`[1,2048,7,7]`
 - NC split-C weight reuse：`[1,70000]`
