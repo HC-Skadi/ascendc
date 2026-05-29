@@ -355,7 +355,11 @@ __aicore__ inline void Prelu<T>::InitChannelNcWeightReuse(
     inputGMX.SetGlobalBuffer((__gm__ T*)x, tilingData->totalLength);
     outputGMY.SetGlobalBuffer((__gm__ T*)y, tilingData->totalLength);
 
-    InitNcBuffers();
+    if (innerSize == 1) {
+        InitNcBuffers();
+    } else {
+        InitNclBuffers();
+    }
 
     GlobalTensor<T> weightTensor;
     weightTensor.SetGlobalBuffer((__gm__ T*)weightGM, channelSize);
@@ -403,7 +407,11 @@ __aicore__ inline void Prelu<T>::InitChannelNcSplitCWeightReuse(
     inputGMX.SetGlobalBuffer((__gm__ T*)x, tilingData->totalLength);
     outputGMY.SetGlobalBuffer((__gm__ T*)y, tilingData->totalLength);
 
-    InitNcBuffers();
+    if (innerSize == 1) {
+        InitNcBuffers();
+    } else {
+        InitNclBuffers();
+    }
 }
 
 template <typename T>
