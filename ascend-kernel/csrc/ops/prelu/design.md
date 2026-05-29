@@ -73,8 +73,8 @@ TilingKey：
 | 3 | channel split-L parallel | `N*C` 很小、L 很大 | task 为 `(rowIdx, tileIdx)` |
 | 4 | NC weight reuse | `L == 1`，整行 C 可放入 UB | 缓存整条 C 维 weight，按 N row 处理 |
 | 5 | NC split-C weight reuse | `L == 1`，整行 C 放不进 UB，但 C 分块可放入 UB | task 为 `(nIdx, cTileIdx)` |
-| 6 | NC split-C by-inner weight reuse | `1 < L <= 64`，整行 `C*L` 放不进 UB，但 C 分块可放入 UB | task 为 `(nIdx, cTileIdx)` |
-| 7 | NC by-inner weight reuse | `1 < L <= 64`，且整行 `C*L` 可放入 UB | 缓存整条 C 维 weight，按 N row 处理 |
+| 6 | NC split-C by-inner weight reuse | `1 < L <= 128`，整行 `C*L` 放不进 UB，但 C 分块可放入 UB | task 为 `(nIdx, cTileIdx)` |
+| 7 | NC by-inner weight reuse | `1 < L <= 128`，且整行 `C*L` 可放入 UB | 缓存整条 C 维 weight，按 N row 处理 |
 
 ## 3. Host 侧 Tiling 策略
 
@@ -122,7 +122,7 @@ innerSizeAligned = AlignUp(L, 32 / sizeof(T));
 该路径分成两个 key：
 
 - key4：`L == 1`，且整行 C 可放入 UB
-- key7：`L <= 64 && C >= 32`，且整行 `C * L` 可放入 UB
+- key7：`L <= 128 && C >= 32`，且整行 `C * L` 可放入 UB
 
 Host 计算：
 
@@ -155,7 +155,7 @@ extraRows = N % usedCoreNum;
 
 ### NC / Small-Medium-L Split-C Weight Reuse
 
-当 `L <= 64 && C >= 32`，但整行 `C * L` 放不进 UB 时，尝试按 C 分块。
+当 `L <= 128 && C >= 32`，但整行 `C * L` 放不进 UB 时，尝试按 C 分块。
 
 `L == 1` 时按元素估算：
 
@@ -193,7 +193,7 @@ baseTasks = totalTaskNum / usedCoreNum;
 extraTasks = totalTaskNum % usedCoreNum;
 ```
 
-对 `[1, 2048, 7]`，split-C task 数不足时回退到 channel full-L；对 `[1, 2048, 7, 7]`，split-C task 数充足时选择 key6。
+对 `[1, 2048, 7]`，split-C task 数不足时回退到 channel full-L；对 `[1, 2048, 7, 7]` 和 `[128, 512, 127]`，split-C task 数充足时选择 key6。
 
 ## 4. Kernel 端实现
 
@@ -266,6 +266,8 @@ CopyOutByOffset(gmOffset, realLen);
 
 最后一个 C 分块可能不足 `cTileChannels`，用 `DataCopyPad` 补齐计算，CopyOut 只写真实 `realLen`。
 
+key6 在单核内部按 `cTileIdx` 对本核分到的 task 重排执行：先构造当前 C 分块的 `weightVec`，再处理该 C 分块覆盖的多个 `nIdx`。这样 `[128, 512, 127]` 这类 case 不再对每个 `(nIdx, cTileIdx)` 重复展开 weight，核间仍按 `N * cTileNum` task 均衡切分。
+
 ## 5. 测试覆盖
 
 Host tiling UT 覆盖：
@@ -293,5 +295,5 @@ Kernel UT 覆盖：
 
 - channel broadcast 固定使用第 1 维 C。
 - `x/weight/y` dtype 必须一致。
-- split-C-with-L 当前只在 `L <= 64 && C >= 32` 范围启用。
+- split-C-with-L 当前只在 `L <= 128 && C >= 32` 范围启用。
 - 若 C 分块仍无法放入 UB，则回退到常规 channel full/split 路径。

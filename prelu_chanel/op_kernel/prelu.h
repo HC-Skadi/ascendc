@@ -326,6 +326,7 @@ __aicore__ inline void Prelu<T>::InitChannelNcSplitCWeightReuse(
     int64_t blockIdx = GetBlockIdx();
     channelSize = tilingData->channelSize;
     innerSize = tilingData->innerSize;
+    totalLength = tilingData->totalLength;
     cTileLength = tilingData->tileLength;
     ubLength = innerSize == 1 ? tilingData->tileLength : tilingData->innerSizeAligned;
     alignedChannelSize = tilingData->innerSizeAligned;
@@ -502,6 +503,9 @@ __aicore__ inline void Prelu<T>::BuildNcWeightVecL1(int64_t tileRows)
 template <typename T>
 __aicore__ inline void Prelu<T>::BuildNcWeightVecByInner(int64_t tileRows)
 {
+    constexpr int64_t blockElems = 32U / sizeof(T);
+    int64_t activeElements = activeChannelSize * innerSize;
+    int64_t alignedActiveElements = ((activeElements + blockElems - 1) / blockElems) * blockElems;
     if constexpr (std::is_same_v<T, bfloat16_t>) {
         LocalTensor<float> weightLocal = weightFp32Buf.Get<float>();
         LocalTensor<float> weightVec = weightVecBuf.Get<float>();
@@ -510,8 +514,7 @@ __aicore__ inline void Prelu<T>::BuildNcWeightVecByInner(int64_t tileRows)
             FillByDuplicate(weightVec, localOffset, weightLocal.GetValue(channelIdx), innerSize);
             localOffset += innerSize;
         }
-        FillByDuplicate(weightVec, activeChannelSize * innerSize, 0.0f,
-            alignedChannelSize - activeChannelSize * innerSize);
+        FillByDuplicate(weightVec, activeElements, 0.0f, alignedActiveElements - activeElements);
         for (int64_t row = 1; row < tileRows; ++row) {
             DataCopy(weightVec[row * alignedChannelSize], weightVec, static_cast<uint32_t>(alignedChannelSize));
         }
@@ -523,8 +526,7 @@ __aicore__ inline void Prelu<T>::BuildNcWeightVecByInner(int64_t tileRows)
             FillByDuplicate(weightVec, localOffset, weightLocal.GetValue(channelIdx), innerSize);
             localOffset += innerSize;
         }
-        FillByDuplicate(weightVec, activeChannelSize * innerSize, static_cast<T>(0),
-            alignedChannelSize - activeChannelSize * innerSize);
+        FillByDuplicate(weightVec, activeElements, static_cast<T>(0), alignedActiveElements - activeElements);
         for (int64_t row = 1; row < tileRows; ++row) {
             DataCopy(weightVec[row * alignedChannelSize], weightVec, static_cast<uint32_t>(alignedChannelSize));
         }
@@ -756,10 +758,17 @@ template <typename T>
 __aicore__ inline void Prelu<T>::ProcessChannelNcSplitCWeightReuseByInner()
 {
     uint32_t alignElements = static_cast<uint32_t>(32U / sizeof(T));
-    for (int64_t taskProgress = 0; taskProgress < taskNum; ++taskProgress) {
-        int64_t taskIdx = taskOffset + taskProgress;
-        int64_t nIdx = taskIdx / tilesPerRow;
-        int64_t cTileIdx = taskIdx % tilesPerRow;
+    int64_t batchSize = totalLength / (channelSize * innerSize);
+    int64_t taskEnd = taskOffset + taskNum;
+    for (int64_t cTileIdx = 0; cTileIdx < tilesPerRow; ++cTileIdx) {
+        int64_t taskRemainder = taskOffset % tilesPerRow;
+        int64_t firstTaskIdx = taskOffset + cTileIdx - taskRemainder;
+        if (cTileIdx < taskRemainder) {
+            firstTaskIdx += tilesPerRow;
+        }
+        if (firstTaskIdx >= taskEnd) {
+            continue;
+        }
         int64_t cTileChannels = cTileLength;
         int64_t cOffset = cTileIdx * cTileChannels;
         int64_t remainC = channelSize - cOffset;
@@ -767,13 +776,19 @@ __aicore__ inline void Prelu<T>::ProcessChannelNcSplitCWeightReuseByInner()
         uint32_t realLen = static_cast<uint32_t>(realC * innerSize);
         uint32_t computeLen = AlignUp(realLen, alignElements);
         uint32_t weightLen = AlignUp(realC, alignElements);
-        int64_t gmOffset = nIdx * channelSize * innerSize + cOffset * innerSize;
 
         CopyWeightTile(cOffset, realC, weightLen);
-        CopyInByOffset(gmOffset, realLen, computeLen);
         BuildNcWeightVecByInner(1);
-        ComputeNc(computeLen);
-        CopyOutByOffset(gmOffset, realLen);
+        for (int64_t taskIdx = firstTaskIdx; taskIdx < taskEnd; taskIdx += tilesPerRow) {
+            int64_t nIdx = taskIdx / tilesPerRow;
+            if (nIdx >= batchSize) {
+                break;
+            }
+            int64_t gmOffset = nIdx * channelSize * innerSize + cOffset * innerSize;
+            CopyInByOffset(gmOffset, realLen, computeLen);
+            ComputeNc(computeLen);
+            CopyOutByOffset(gmOffset, realLen);
+        }
     }
 }
 
