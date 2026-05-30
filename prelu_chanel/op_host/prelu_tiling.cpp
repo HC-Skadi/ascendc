@@ -30,8 +30,6 @@ constexpr uint64_t NCL_CONTIGUOUS_MIN_CORE_NUM = 31U;
 constexpr uint64_t LARGE_C_WEIGHT_REUSE_MIN_CHANNEL_SIZE = 32U;
 constexpr uint64_t MIN_SPLIT_C_WEIGHT_REUSE_CORE_NUM = 10U;
 constexpr uint64_t MAX_DATA_COPY_BLOCK_COUNT = 4095U;
-constexpr uint64_t N_128_BATCH_SIZE = 128U;
-constexpr uint64_t N_128_TARGET_CORE_NUM = 32U;
 
 static ge::graphStatus GetPlatformInfo(gert::TilingContext* context, uint64_t& ubSize, int64_t& coreNum)
 {
@@ -202,12 +200,8 @@ static uint64_t AlignDown(uint64_t value, uint64_t align)
 
 static uint64_t ChooseCoreNumByBatch(uint64_t coreLimit, uint64_t batchSize, uint64_t taskNum)
 {
-    uint64_t finalCoreNum = std::min(coreLimit, taskNum);
-    if (batchSize == N_128_BATCH_SIZE && coreLimit >= N_128_TARGET_CORE_NUM &&
-        taskNum >= N_128_TARGET_CORE_NUM) {
-        return N_128_TARGET_CORE_NUM;
-    }
-    return finalCoreNum;
+    (void)batchSize;
+    return std::min(coreLimit, taskNum);
 }
 
 static uint64_t ChooseSplitCByInnerTileChannels(
