@@ -922,10 +922,8 @@ __aicore__ inline void Prelu<T>::ProcessChannelNcSplitCWeightReuseByInner()
             ComputeNclByAlignedL(realC, realC, computeLen);
 
             LocalTensor<T> yLocal = outputQueueY.DeQue<T>();
-            DataCopyExtParams outParams{1, innerCopyBytes, 0, 0, 0};
-            for (uint32_t cIdx = 0; cIdx < realC; ++cIdx) {
-                DataCopyPad(outputGMY[gmOffset + cIdx * innerSize], yLocal[cIdx * innerSizeAligned], outParams);
-            }
+            DataCopyExtParams outParams{static_cast<uint16_t>(realC), innerCopyBytes, 0, 0, 0};
+            DataCopyPad(outputGMY[gmOffset], yLocal, outParams);
             outputQueueY.FreeTensor(yLocal);
         }
     }
