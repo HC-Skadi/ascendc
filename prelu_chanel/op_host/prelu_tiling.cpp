@@ -30,6 +30,8 @@ constexpr uint64_t NCL_CONTIGUOUS_MIN_CORE_NUM = 31U;
 constexpr uint64_t LARGE_C_WEIGHT_REUSE_MIN_CHANNEL_SIZE = 32U;
 constexpr uint64_t MIN_SPLIT_C_WEIGHT_REUSE_CORE_NUM = 10U;
 constexpr uint64_t MAX_DATA_COPY_BLOCK_COUNT = 4095U;
+constexpr uint64_t N_128_BATCH_SIZE = 128U;
+constexpr uint64_t N_128_TARGET_CORE_NUM = 32U;
 
 static ge::graphStatus GetPlatformInfo(gert::TilingContext* context, uint64_t& ubSize, int64_t& coreNum)
 {
@@ -198,6 +200,16 @@ static uint64_t AlignDown(uint64_t value, uint64_t align)
     return (value / align) * align;
 }
 
+static uint64_t ChooseCoreNumByBatch(uint64_t coreLimit, uint64_t batchSize, uint64_t taskNum)
+{
+    uint64_t finalCoreNum = std::min(coreLimit, taskNum);
+    if (batchSize == N_128_BATCH_SIZE && coreLimit >= N_128_TARGET_CORE_NUM &&
+        taskNum >= N_128_TARGET_CORE_NUM) {
+        return N_128_TARGET_CORE_NUM;
+    }
+    return finalCoreNum;
+}
+
 static uint64_t ChooseSplitCByInnerTileChannels(
     uint64_t maxSplitCChannels, uint64_t channelSize, uint64_t batchSize, uint64_t blockElementNum,
     uint64_t coreLimit)
@@ -327,7 +339,7 @@ static ge::graphStatus CalcTiling(
         alignedChannelSizeForNcl <= std::numeric_limits<uint64_t>::max() / nclWeightCacheBytesPerElement;
     uint64_t nclWeightCacheBytes =
         nclWeightCacheSizeValid ? alignedChannelSizeForNcl * nclWeightCacheBytesPerElement : 0U;
-    uint64_t nclUsedCoreNum = std::min(coreLimit, batchSize);
+    uint64_t nclUsedCoreNum = ChooseCoreNumByBatch(coreLimit, batchSize, batchSize);
     uint64_t nclMinUsedCoreNum = std::min(coreLimit, NCL_CONTIGUOUS_MIN_CORE_NUM);
     if (innerSize > 1 && static_cast<uint64_t>(innerSize) < NCL_CONTIGUOUS_MAX_INNER_SIZE &&
         static_cast<uint64_t>(channelSize) >= NCL_CONTIGUOUS_MIN_CHANNEL_SIZE &&
@@ -390,7 +402,7 @@ static ge::graphStatus CalcTiling(
                  alignedRowElements) *
                 alignedRowElements;
             if (ncMaxTileElements >= alignedRowElements) {
-                uint64_t finalCoreNum = std::min(coreLimit, batchSize);
+                uint64_t finalCoreNum = ChooseCoreNumByBatch(coreLimit, batchSize, batchSize);
                 tiling->tileLength = static_cast<int64_t>(ncMaxTileElements);
                 tiling->innerSizeAligned = static_cast<int64_t>(alignedRowElements);
                 tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
@@ -426,7 +438,7 @@ static ge::graphStatus CalcTiling(
                     totalTaskNum > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
                     OP_LOGE(context, "Prelu: split-C total task count exceeds int64 range"),
                     return ge::GRAPH_FAILED);
-                uint64_t finalCoreNum = std::min(coreLimit, totalTaskNum);
+                uint64_t finalCoreNum = ChooseCoreNumByBatch(coreLimit, batchSize, totalTaskNum);
                 tiling->tileLength = static_cast<int64_t>(splitCTileLength);
                 tiling->innerSizeAligned = static_cast<int64_t>(splitCTileLength);
                 tiling->usedCoreNum = static_cast<int64_t>(finalCoreNum);
@@ -461,7 +473,7 @@ static ge::graphStatus CalcTiling(
                     totalTaskNum > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
                     OP_LOGE(context, "Prelu: small-L split-C total task count exceeds int64 range"),
                     return ge::GRAPH_FAILED);
-                uint64_t finalCoreNum = std::min(coreLimit, totalTaskNum);
+                uint64_t finalCoreNum = ChooseCoreNumByBatch(coreLimit, batchSize, totalTaskNum);
                 if (finalCoreNum >= std::min(coreLimit, MIN_SPLIT_C_WEIGHT_REUSE_CORE_NUM)) {
                     tiling->tileLength = static_cast<int64_t>(splitCTileChannels);
                     tiling->innerSizeAligned = static_cast<int64_t>(alignedSplitCElements);
