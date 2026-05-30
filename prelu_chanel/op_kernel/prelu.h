@@ -335,6 +335,7 @@ __aicore__ inline void Prelu<T>::InitChannelNcWeightReuse(
     innerSize = tilingData->innerSize;
     alignedChannelSize = tilingData->innerSizeAligned;
     innerStride = innerSize == 1 ? 1 : alignedChannelSize / channelSize;
+    innerSizeAligned = innerStride;
     alignedWeightSize = AlignUp(static_cast<uint32_t>(channelSize), static_cast<uint32_t>(32U / sizeof(T)));
     activeChannelSize = channelSize;
     rowsPerTile = ubLength / alignedChannelSize;
@@ -511,10 +512,8 @@ __aicore__ inline void Prelu<T>::CopyOutNcByRows(int64_t nOffset, int64_t tileRo
         outputQueueY.FreeTensor(yLocal);
         return;
     }
-    for (int64_t rowOffset = 0; rowOffset < tileRows; rowOffset += MAX_COPY_BLOCK_COUNT) {
-        uint16_t blockCount = static_cast<uint16_t>(
-            (tileRows - rowOffset) > MAX_COPY_BLOCK_COUNT ? MAX_COPY_BLOCK_COUNT : (tileRows - rowOffset));
-        DataCopyExtParams copyParams{blockCount, static_cast<uint32_t>(realRowLen * sizeof(T)), 0, 0, 0};
+    DataCopyExtParams copyParams{1, static_cast<uint32_t>(realRowLen * sizeof(T)), 0, 0, 0};
+    for (int64_t rowOffset = 0; rowOffset < tileRows; ++rowOffset) {
         int64_t gmOffset = (nOffset + rowOffset) * channelSize * innerSize;
         int64_t localOffset = rowOffset * alignedChannelSize;
         DataCopyPad(outputGMY[gmOffset], yLocal[localOffset], copyParams);
@@ -527,10 +526,8 @@ __aicore__ inline void Prelu<T>::CopyOutNcByRowsInnerStride(int64_t nOffset, int
 {
     LocalTensor<T> yLocal = outputQueueY.DeQue<T>();
     int64_t totalBlocks = tileRows * channelSize;
-    for (int64_t blockOffset = 0; blockOffset < totalBlocks; blockOffset += MAX_COPY_BLOCK_COUNT) {
-        uint16_t blockCount = static_cast<uint16_t>(
-            (totalBlocks - blockOffset) > MAX_COPY_BLOCK_COUNT ? MAX_COPY_BLOCK_COUNT : (totalBlocks - blockOffset));
-        DataCopyExtParams copyParams{blockCount, static_cast<uint32_t>(innerSize * sizeof(T)), 0, 0, 0};
+    DataCopyExtParams copyParams{1, static_cast<uint32_t>(innerSize * sizeof(T)), 0, 0, 0};
+    for (int64_t blockOffset = 0; blockOffset < totalBlocks; ++blockOffset) {
         int64_t gmOffset = nOffset * channelSize * innerSize + blockOffset * innerSize;
         int64_t localOffset = blockOffset * innerStride;
         DataCopyPad(outputGMY[gmOffset], yLocal[localOffset], copyParams);
@@ -750,11 +747,8 @@ __aicore__ inline void Prelu<T>::ProcessChannelNclContiguous()
         ComputeNclByAlignedL(totalBlocks, channelSize, computeLen);
 
         LocalTensor<T> yLocal = outputQueueY.DeQue<T>();
-        for (int64_t blockOffset = 0; blockOffset < totalBlocks; blockOffset += MAX_COPY_BLOCK_COUNT) {
-            uint16_t blockCount = static_cast<uint16_t>(
-                (totalBlocks - blockOffset) > MAX_COPY_BLOCK_COUNT ? MAX_COPY_BLOCK_COUNT :
-                                                                      (totalBlocks - blockOffset));
-            DataCopyExtParams outParams{blockCount, static_cast<uint32_t>(innerSize * sizeof(T)), 0, 0, 0};
+        DataCopyExtParams outParams{1, static_cast<uint32_t>(innerSize * sizeof(T)), 0, 0, 0};
+        for (int64_t blockOffset = 0; blockOffset < totalBlocks; ++blockOffset) {
             DataCopyPad(outputGMY[gmOffset + blockOffset * innerSize], yLocal[blockOffset * innerSizeAligned],
                 outParams);
         }
@@ -912,9 +906,10 @@ __aicore__ inline void Prelu<T>::ProcessChannelNcSplitCWeightReuseByInner()
             ComputeNclByAlignedL(realC, realC, computeLen);
 
             LocalTensor<T> yLocal = outputQueueY.DeQue<T>();
-            DataCopyExtParams outParams{static_cast<uint16_t>(realC),
-                static_cast<uint32_t>(innerSize * sizeof(T)), 0, 0, 0};
-            DataCopyPad(outputGMY[gmOffset], yLocal, outParams);
+            DataCopyExtParams outParams{1, static_cast<uint32_t>(innerSize * sizeof(T)), 0, 0, 0};
+            for (uint32_t cIdx = 0; cIdx < realC; ++cIdx) {
+                DataCopyPad(outputGMY[gmOffset + cIdx * innerSize], yLocal[cIdx * innerSizeAligned], outParams);
+            }
             outputQueueY.FreeTensor(yLocal);
         }
     }
