@@ -74,8 +74,8 @@ def gen_golden():
     print("\nFiles generated successfully!")
 
 def gen_golden_fp32():
-    x_torch = torch.randn(1, 512, 32, dtype=torch.float)
-    alpha_torch = torch.randn(512, dtype=torch.float)
+    x_torch = torch.randn(128, 256, 254, dtype=torch.float)
+    alpha_torch = torch.randn(256, dtype=torch.float)
     x_fp16 = x_torch.numpy()
     alpha_fp16 = alpha_torch.numpy()
       

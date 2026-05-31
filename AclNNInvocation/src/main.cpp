@@ -23,8 +23,8 @@ int deviceId = 0;
 
 OperatorDesc CreateOpDesc()
 {   
-    std::vector<int64_t> out_shape{1, 512, 32};
-    std::vector<int64_t> weight_shape{512};
+    std::vector<int64_t> out_shape{128, 256, 254};
+    std::vector<int64_t> weight_shape{256};
     aclDataType dataType = ACL_FLOAT;
   
     aclFormat format = ACL_FORMAT_ND;
