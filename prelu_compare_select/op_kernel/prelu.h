@@ -18,6 +18,9 @@ namespace NsPrelu {
 using namespace AscendC;
 
 constexpr int32_t BUFFER_NUM = 2;
+constexpr int64_t SMALL_CHANNEL_SCALAR_INNER = 16;
+constexpr int64_t SMALL_CHANNEL_SCALAR_CHANNEL = 16;
+constexpr uint32_t SMALL_CHANNEL_SCALAR_NUM = 4096;
 
 template <typename T>
 __aicore__ inline void CopyGmToLocalPad(LocalTensor<T>& dst, const GlobalTensor<T>& src, uint32_t dataNum)
@@ -48,6 +51,10 @@ private:
     __aicore__ inline void Compute(int64_t progress, uint32_t currentNum);
     __aicore__ inline void ComputeScalar(uint32_t currentNum, LocalTensor<T>& xLocal, LocalTensor<T>& yLocal);
     __aicore__ inline void ComputeChannel(int64_t progress, uint32_t currentNum, LocalTensor<T>& xLocal, LocalTensor<T>& yLocal);
+    __aicore__ inline void ComputeChannelScalar(
+        int64_t progress, uint32_t currentNum, LocalTensor<T>& xLocal, LocalTensor<T>& yLocal);
+    __aicore__ inline void FillChannelWeight(LocalTensor<T>& dst, int64_t progress, uint32_t currentNum);
+    __aicore__ inline void FillChannelWeightFp32(LocalTensor<float>& dst, int64_t progress, uint32_t currentNum);
     __aicore__ inline T LoadWeight(int64_t weightOffset);
     __aicore__ inline float LoadWeightFp32(int64_t weightOffset);
 
@@ -56,8 +63,8 @@ private:
     TQue<QuePosition::VECIN, BUFFER_NUM> inputQueueX;
     TQue<QuePosition::VECOUT, BUFFER_NUM> outputQueueY;
     TBuf<TPosition::VECCALC> tmpXFp32;
+    TBuf<TPosition::VECCALC> tmpBufWeight;
     TBuf<TPosition::VECCALC> tmpBufProd;
-    TBuf<TPosition::VECCALC> tmpBufPos;
     TBuf<TPosition::VECCALC> tmpBufMask;
 
     GlobalTensor<T> inputGMX;
@@ -78,6 +85,14 @@ __aicore__ inline float ToFloat(const bfloat16_t& bVal)
     uint16_t weightBits = *reinterpret_cast<const uint16_t*>(&bVal);
     uint32_t floatBits = static_cast<uint32_t>(weightBits) << 16;
     return *reinterpret_cast<float*>(&floatBits);
+}
+
+__aicore__ inline bfloat16_t ToBfloat16(float value)
+{
+    uint32_t floatBits = *reinterpret_cast<uint32_t*>(&value);
+    uint32_t roundBias = 0x7FFFU + ((floatBits >> 16U) & 1U);
+    uint16_t bf16Bits = static_cast<uint16_t>((floatBits + roundBias) >> 16U);
+    return *reinterpret_cast<bfloat16_t*>(&bf16Bits);
 }
 
 template <typename ComputeT>
@@ -122,9 +137,10 @@ __aicore__ inline void Prelu<T, schMode>::Init(
     pipe_->InitBuffer(outputQueueY, BUFFER_NUM, ubLength * sizeof(T));
     if constexpr (std::is_same_v<T, bfloat16_t>) {
         pipe_->InitBuffer(tmpXFp32, ubLength * sizeof(float));
+        pipe_->InitBuffer(tmpBufWeight, ubLength * sizeof(float));
         pipe_->InitBuffer(tmpBufProd, ubLength * sizeof(float));
-        pipe_->InitBuffer(tmpBufPos, ubLength * sizeof(float));
     } else {
+        pipe_->InitBuffer(tmpBufWeight, ubLength * sizeof(T));
         pipe_->InitBuffer(tmpBufProd, ubLength * sizeof(T));
     }
     pipe_->InitBuffer(tmpBufMask, ubLength * sizeof(uint8_t));
@@ -163,6 +179,48 @@ __aicore__ inline float Prelu<T, schMode>::LoadWeightFp32(int64_t weightOffset)
 }
 
 template <typename T, uint32_t schMode>
+__aicore__ inline void Prelu<T, schMode>::FillChannelWeight(
+    LocalTensor<T>& dst, int64_t progress, uint32_t currentNum)
+{
+    uint32_t localOffset = 0;
+    while (localOffset < currentNum) {
+        int64_t globalOffset = blockOffset + progress * ubLength + localOffset;
+        int64_t offsetInChannel = globalOffset % innerSize;
+        int64_t remainInChannel = innerSize - offsetInChannel;
+        int64_t remainInTile = static_cast<int64_t>(currentNum) - static_cast<int64_t>(localOffset);
+        uint32_t segmentLength = static_cast<uint32_t>(
+            remainInChannel < remainInTile ? remainInChannel : remainInTile);
+        int64_t weightOffset = (globalOffset / innerSize) % channelSize;
+        T weight = LoadWeight(weightOffset);
+        for (uint32_t i = 0; i < segmentLength; ++i) {
+            dst.SetValue(localOffset + i, weight);
+        }
+        localOffset += segmentLength;
+    }
+}
+
+template <typename T, uint32_t schMode>
+__aicore__ inline void Prelu<T, schMode>::FillChannelWeightFp32(
+    LocalTensor<float>& dst, int64_t progress, uint32_t currentNum)
+{
+    uint32_t localOffset = 0;
+    while (localOffset < currentNum) {
+        int64_t globalOffset = blockOffset + progress * ubLength + localOffset;
+        int64_t offsetInChannel = globalOffset % innerSize;
+        int64_t remainInChannel = innerSize - offsetInChannel;
+        int64_t remainInTile = static_cast<int64_t>(currentNum) - static_cast<int64_t>(localOffset);
+        uint32_t segmentLength = static_cast<uint32_t>(
+            remainInChannel < remainInTile ? remainInChannel : remainInTile);
+        int64_t weightOffset = (globalOffset / innerSize) % channelSize;
+        float weight = LoadWeightFp32(weightOffset);
+        for (uint32_t i = 0; i < segmentLength; ++i) {
+            dst.SetValue(localOffset + i, weight);
+        }
+        localOffset += segmentLength;
+    }
+}
+
+template <typename T, uint32_t schMode>
 __aicore__ inline void Prelu<T, schMode>::ComputeScalar(uint32_t currentNum, LocalTensor<T>& xLocal, LocalTensor<T>& yLocal)
 {
     if constexpr (std::is_same_v<T, bfloat16_t>) {
@@ -186,47 +244,98 @@ __aicore__ inline void Prelu<T, schMode>::ComputeScalar(uint32_t currentNum, Loc
 }
 
 template <typename T, uint32_t schMode>
+__aicore__ inline void Prelu<T, schMode>::ComputeChannelScalar(
+    int64_t progress, uint32_t currentNum, LocalTensor<T>& xLocal, LocalTensor<T>& yLocal)
+{
+    for (uint32_t i = 0; i < currentNum; ++i) {
+        int64_t globalOffset = blockOffset + progress * ubLength + i;
+        int64_t weightOffset = (globalOffset / innerSize) % channelSize;
+        if constexpr (std::is_same_v<T, bfloat16_t>) {
+            float xVal = ToFloat(xLocal.GetValue(i));
+            float weight = LoadWeightFp32(weightOffset);
+            float yVal = xVal > 0.0f ? xVal : xVal * weight;
+            yLocal.SetValue(i, ToBfloat16(yVal));
+        } else {
+            float xVal = static_cast<float>(xLocal.GetValue(i));
+            float weight = static_cast<float>(LoadWeight(weightOffset));
+            float yVal = xVal > 0.0f ? xVal : xVal * weight;
+            yLocal.SetValue(i, static_cast<T>(yVal));
+        }
+    }
+}
+
+template <typename T, uint32_t schMode>
 __aicore__ inline void Prelu<T, schMode>::ComputeChannel(
     int64_t progress, uint32_t currentNum, LocalTensor<T>& xLocal, LocalTensor<T>& yLocal)
 {
-    uint32_t localOffset = 0;
+    if (innerSize <= SMALL_CHANNEL_SCALAR_INNER && channelSize <= SMALL_CHANNEL_SCALAR_CHANNEL &&
+        currentNum <= SMALL_CHANNEL_SCALAR_NUM) {
+        ComputeChannelScalar(progress, currentNum, xLocal, yLocal);
+        return;
+    }
+
     if constexpr (std::is_same_v<T, bfloat16_t>) {
         LocalTensor<float> xFp32 = tmpXFp32.Get<float>();
+        LocalTensor<float> weightFp32 = tmpBufWeight.Get<float>();
         LocalTensor<float> prod = tmpBufProd.Get<float>();
-        LocalTensor<float> pos = tmpBufPos.Get<float>();
-        Cast(xFp32, xLocal, RoundMode::CAST_NONE, currentNum);
-        while (localOffset < currentNum) {
-            int64_t globalOffset = blockOffset + progress * ubLength + localOffset;
-            int64_t offsetInChannel = globalOffset % innerSize;
-            int64_t remainInChannel = innerSize - offsetInChannel;
-            int64_t remainInTile = static_cast<int64_t>(currentNum) - static_cast<int64_t>(localOffset);
-            uint32_t segmentLength = static_cast<uint32_t>(
-                remainInChannel < remainInTile ? remainInChannel : remainInTile);
-            int64_t weightOffset = (globalOffset / innerSize) % channelSize;
-            float weight = LoadWeightFp32(weightOffset);
-            Maxs(pos[localOffset], xFp32[localOffset], 0.0f, segmentLength);
-            Mins(prod[localOffset], xFp32[localOffset], 0.0f, segmentLength);
-            Muls(prod[localOffset], prod[localOffset], weight, segmentLength);
-            Add(xFp32[localOffset], pos[localOffset], prod[localOffset], segmentLength);
-            localOffset += segmentLength;
+        LocalTensor<uint8_t> mask = tmpBufMask.Get<uint8_t>();
+        if (innerSize == 1) {
+            uint32_t compareLength = AlignCompareLength<float>(currentNum);
+            Cast(xFp32, xLocal, RoundMode::CAST_NONE, currentNum);
+            FillChannelWeightFp32(weightFp32, progress, currentNum);
+            Mul(prod, xFp32, weightFp32, compareLength);
+            CompareScalar(mask, xFp32, 0.0f, CMPMODE::GT, compareLength);
+            Select(xFp32, mask, xFp32, prod, SELMODE::VSEL_TENSOR_TENSOR_MODE, compareLength);
+            Cast(yLocal, xFp32, RoundMode::CAST_RINT, currentNum);
+        } else {
+            uint32_t localOffset = 0;
+            while (localOffset < currentNum) {
+                int64_t globalOffset = blockOffset + progress * ubLength + localOffset;
+                int64_t offsetInChannel = globalOffset % innerSize;
+                int64_t remainInChannel = innerSize - offsetInChannel;
+                int64_t remainInTile = static_cast<int64_t>(currentNum) - static_cast<int64_t>(localOffset);
+                uint32_t segmentLength = static_cast<uint32_t>(
+                    remainInChannel < remainInTile ? remainInChannel : remainInTile);
+                int64_t weightOffset = (globalOffset / innerSize) % channelSize;
+                float weight = LoadWeightFp32(weightOffset);
+                uint32_t compareLength = AlignCompareLength<float>(segmentLength);
+                Cast(xFp32, xLocal[localOffset], RoundMode::CAST_NONE, segmentLength);
+                Muls(prod, xFp32, weight, compareLength);
+                CompareScalar(mask, xFp32, 0.0f, CMPMODE::GT, compareLength);
+                Select(prod, mask, xFp32, prod, SELMODE::VSEL_TENSOR_TENSOR_MODE, compareLength);
+                Cast(yLocal[localOffset], prod, RoundMode::CAST_RINT, segmentLength);
+                localOffset += segmentLength;
+            }
         }
-        Cast(yLocal, xFp32, RoundMode::CAST_RINT, currentNum);
     } else {
+        LocalTensor<T> tmp = tmpBufWeight.Get<T>();
         LocalTensor<T> prod = tmpBufProd.Get<T>();
-        while (localOffset < currentNum) {
-            int64_t globalOffset = blockOffset + progress * ubLength + localOffset;
-            int64_t offsetInChannel = globalOffset % innerSize;
-            int64_t remainInChannel = innerSize - offsetInChannel;
-            int64_t remainInTile = static_cast<int64_t>(currentNum) - static_cast<int64_t>(localOffset);
-            uint32_t segmentLength = static_cast<uint32_t>(
-                remainInChannel < remainInTile ? remainInChannel : remainInTile);
-            int64_t weightOffset = (globalOffset / innerSize) % channelSize;
-            T weight = LoadWeight(weightOffset);
-            Maxs(yLocal[localOffset], xLocal[localOffset], static_cast<T>(0), segmentLength);
-            Mins(prod[localOffset], xLocal[localOffset], static_cast<T>(0), segmentLength);
-            Muls(prod[localOffset], prod[localOffset], weight, segmentLength);
-            Add(yLocal[localOffset], yLocal[localOffset], prod[localOffset], segmentLength);
-            localOffset += segmentLength;
+        LocalTensor<uint8_t> mask = tmpBufMask.Get<uint8_t>();
+        if (innerSize == 1) {
+            uint32_t compareLength = AlignCompareLength<T>(currentNum);
+            FillChannelWeight(tmp, progress, currentNum);
+            Mul(prod, xLocal, tmp, compareLength);
+            CompareScalar(mask, xLocal, static_cast<T>(0), CMPMODE::GT, compareLength);
+            Select(yLocal, mask, xLocal, prod, SELMODE::VSEL_TENSOR_TENSOR_MODE, compareLength);
+        } else {
+            uint32_t localOffset = 0;
+            while (localOffset < currentNum) {
+                int64_t globalOffset = blockOffset + progress * ubLength + localOffset;
+                int64_t offsetInChannel = globalOffset % innerSize;
+                int64_t remainInChannel = innerSize - offsetInChannel;
+                int64_t remainInTile = static_cast<int64_t>(currentNum) - static_cast<int64_t>(localOffset);
+                uint32_t segmentLength = static_cast<uint32_t>(
+                    remainInChannel < remainInTile ? remainInChannel : remainInTile);
+                int64_t weightOffset = (globalOffset / innerSize) % channelSize;
+                T weight = LoadWeight(weightOffset);
+                uint32_t compareLength = AlignCompareLength<T>(segmentLength);
+                Adds(tmp, xLocal[localOffset], static_cast<T>(0), segmentLength);
+                Muls(prod, tmp, weight, compareLength);
+                CompareScalar(mask, tmp, static_cast<T>(0), CMPMODE::GT, compareLength);
+                Select(prod, mask, tmp, prod, SELMODE::VSEL_TENSOR_TENSOR_MODE, compareLength);
+                Adds(yLocal[localOffset], prod, static_cast<T>(0), segmentLength);
+                localOffset += segmentLength;
+            }
         }
     }
 }

@@ -139,10 +139,10 @@ static ge::graphStatus GetShapeAndDtypeInfo(
 static uint64_t GetBufferBytesPerElement(ge::DataType dataType)
 {
     if (dataType == ge::DT_FLOAT) {
-        return 21U;
+        return 25U;
     }
     if (dataType == ge::DT_FLOAT16) {
-        return 11U;
+        return 13U;
     }
     return 21U;
 }
