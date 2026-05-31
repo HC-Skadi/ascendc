@@ -72,6 +72,9 @@ private:
     __aicore__ inline void LoadChannelWeight(int64_t channelIdx);
     __aicore__ inline void InitBuffers();
     __aicore__ inline void InitNcBuffers();
+    __aicore__ inline void SyncMte2ToV();
+    __aicore__ inline void SyncMte2ToS();
+    __aicore__ inline void SyncVToS();
 
 private:
     TPipe* pipe_ = nullptr;
@@ -108,6 +111,30 @@ private:
     int64_t rowsPerTile = 1;
 };
 
+template <typename T>
+__aicore__ inline void Prelu<T>::SyncMte2ToV()
+{
+    event_t eventId = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
+    SetFlag<HardEvent::MTE2_V>(eventId);
+    WaitFlag<HardEvent::MTE2_V>(eventId);
+}
+
+template <typename T>
+__aicore__ inline void Prelu<T>::SyncMte2ToS()
+{
+    event_t eventId = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));
+    SetFlag<HardEvent::MTE2_S>(eventId);
+    WaitFlag<HardEvent::MTE2_S>(eventId);
+}
+
+template <typename T>
+__aicore__ inline void Prelu<T>::SyncVToS()
+{
+    event_t eventId = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+    SetFlag<HardEvent::V_S>(eventId);
+    WaitFlag<HardEvent::V_S>(eventId);
+}
+
 __aicore__ inline float LoadBf16ScalarAsFloat(GM_ADDR weight)
 {
     uint16_t weightBits = *((__gm__ uint16_t*)weight);
@@ -118,6 +145,29 @@ __aicore__ inline float LoadBf16ScalarAsFloat(GM_ADDR weight)
 __aicore__ inline uint32_t AlignUp(uint32_t value, uint32_t align)
 {
     return ((value + align - 1U) / align) * align;
+}
+
+template <typename T>
+__aicore__ inline void FillWeightSpan(const LocalTensor<T>& weightVec, int64_t offset, int64_t length, T value)
+{
+    uint32_t alignElements = static_cast<uint32_t>(32U / sizeof(T));
+    int64_t current = offset;
+    int64_t end = offset + length;
+    while (current < end && (current % alignElements) != 0) {
+        weightVec.SetValue(current, value);
+        ++current;
+    }
+
+    int64_t duplicateLength = ((end - current) / alignElements) * alignElements;
+    if (duplicateLength > 0) {
+        Duplicate(weightVec[current], value, static_cast<uint32_t>(duplicateLength));
+        current += duplicateLength;
+    }
+
+    while (current < end) {
+        weightVec.SetValue(current, value);
+        ++current;
+    }
 }
 
 template <typename T>
@@ -281,11 +331,10 @@ __aicore__ inline void Prelu<T>::InitChannelNcWeightReuse(
     LocalTensor<T> weightLocal = weightBuf.Get<T>();
     CopyGmToLocalPad(weightLocal, weightTensor, static_cast<uint32_t>(channelSize),
         static_cast<uint32_t>(alignedWeightSize));
-    PipeBarrier<PIPE_ALL>();
     if constexpr (std::is_same_v<T, bfloat16_t>) {
+        SyncMte2ToV();
         LocalTensor<float> weightFp32 = weightFp32Buf.Get<float>();
         Cast(weightFp32, weightLocal, RoundMode::CAST_NONE, static_cast<uint32_t>(alignedWeightSize));
-        PipeBarrier<PIPE_ALL>();
     }
 }
 
@@ -416,52 +465,57 @@ __aicore__ inline void Prelu<T>::BuildNcWeightVec(int64_t tileRows)
         LocalTensor<float> weightLocal = weightFp32Buf.Get<float>();
         LocalTensor<float> weightVec = weightVecBuf.Get<float>();
         if (innerSize == 1) {
+            PipeBarrier<PIPE_V>();
             for (int64_t row = 0; row < tileRows; ++row) {
                 int64_t rowOffset = row * alignedChannelSize;
                 DataCopy(weightVec[rowOffset], weightLocal, static_cast<uint32_t>(alignedWeightSize));
             }
+            PipeBarrier<PIPE_V>();
         } else {
+            SyncVToS();
             int64_t localOffset = 0;
             for (int64_t channelIdx = 0; channelIdx < activeChannelSize; ++channelIdx) {
                 float weightValue = weightLocal.GetValue(channelIdx);
-                for (int64_t innerIdx = 0; innerIdx < innerSize; ++innerIdx) {
-                    weightVec.SetValue(localOffset + innerIdx, weightValue);
-                }
+                FillWeightSpan(weightVec, localOffset, innerSize, weightValue);
                 localOffset += innerSize;
             }
-            for (int64_t padIdx = activeChannelSize * innerSize; padIdx < alignedChannelSize; ++padIdx) {
-                weightVec.SetValue(padIdx, 0.0f);
-            }
-            for (int64_t row = 1; row < tileRows; ++row) {
-                DataCopy(weightVec[row * alignedChannelSize], weightVec, static_cast<uint32_t>(alignedChannelSize));
+            PipeBarrier<PIPE_V>();
+            if (tileRows > 1) {
+                for (int64_t row = 1; row < tileRows; ++row) {
+                    DataCopy(weightVec[row * alignedChannelSize], weightVec,
+                        static_cast<uint32_t>(alignedChannelSize));
+                }
+                PipeBarrier<PIPE_V>();
             }
         }
     } else {
         LocalTensor<T> weightLocal = weightBuf.Get<T>();
         LocalTensor<T> weightVec = weightVecBuf.Get<T>();
         if (innerSize == 1) {
+            SyncMte2ToV();
             for (int64_t row = 0; row < tileRows; ++row) {
                 int64_t rowOffset = row * alignedChannelSize;
                 DataCopy(weightVec[rowOffset], weightLocal, static_cast<uint32_t>(alignedWeightSize));
             }
+            PipeBarrier<PIPE_V>();
         } else {
+            SyncMte2ToS();
             int64_t localOffset = 0;
             for (int64_t channelIdx = 0; channelIdx < activeChannelSize; ++channelIdx) {
                 T weightValue = weightLocal.GetValue(channelIdx);
-                for (int64_t innerIdx = 0; innerIdx < innerSize; ++innerIdx) {
-                    weightVec.SetValue(localOffset + innerIdx, weightValue);
-                }
+                FillWeightSpan(weightVec, localOffset, innerSize, weightValue);
                 localOffset += innerSize;
             }
-            for (int64_t padIdx = activeChannelSize * innerSize; padIdx < alignedChannelSize; ++padIdx) {
-                weightVec.SetValue(padIdx, static_cast<T>(0));
-            }
-            for (int64_t row = 1; row < tileRows; ++row) {
-                DataCopy(weightVec[row * alignedChannelSize], weightVec, static_cast<uint32_t>(alignedChannelSize));
+            PipeBarrier<PIPE_V>();
+            if (tileRows > 1) {
+                for (int64_t row = 1; row < tileRows; ++row) {
+                    DataCopy(weightVec[row * alignedChannelSize], weightVec,
+                        static_cast<uint32_t>(alignedChannelSize));
+                }
+                PipeBarrier<PIPE_V>();
             }
         }
     }
-    PipeBarrier<PIPE_ALL>();
 }
 
 template <typename T>
@@ -503,11 +557,10 @@ __aicore__ inline void Prelu<T>::CopyWeightTile(int64_t cOffset, uint32_t realC,
     LocalTensor<T> weightLocal = weightBuf.Get<T>();
     CopyGmToLocalPad(weightLocal, weightTensor, realC, alignedC);
     activeChannelSize = realC;
-    PipeBarrier<PIPE_ALL>();
     if constexpr (std::is_same_v<T, bfloat16_t>) {
+        SyncMte2ToV();
         LocalTensor<float> weightFp32 = weightFp32Buf.Get<float>();
         Cast(weightFp32, weightLocal, RoundMode::CAST_NONE, alignedC);
-        PipeBarrier<PIPE_ALL>();
     }
 }
 

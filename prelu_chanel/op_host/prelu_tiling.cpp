@@ -24,6 +24,8 @@ constexpr uint64_t MIN_PARALLEL_TILE_NUM = 2U;
 constexpr uint64_t UB_RESERVED_SIZE = 1024U;
 constexpr uint64_t SMALL_L_WEIGHT_REUSE_MAX_INNER_SIZE = 16U;
 constexpr uint64_t SPLIT_C_WEIGHT_REUSE_MAX_INNER_SIZE = 64U;
+constexpr uint64_t LARGE_L_SPLIT_C_WEIGHT_REUSE_MAX_INNER_SIZE = 128U;
+constexpr uint64_t LARGE_L_SPLIT_C_WEIGHT_REUSE_MAX_CHANNEL_SIZE = 256U;
 constexpr uint64_t LARGE_C_WEIGHT_REUSE_MIN_CHANNEL_SIZE = 32U;
 constexpr uint64_t MIN_SPLIT_C_WEIGHT_REUSE_CORE_NUM = 10U;
 
@@ -272,6 +274,9 @@ static ge::graphStatus CalcTiling(
     bool preferWeightReuseByRow =
         innerSize == 1 ||
         (static_cast<uint64_t>(innerSize) <= SPLIT_C_WEIGHT_REUSE_MAX_INNER_SIZE &&
+         static_cast<uint64_t>(channelSize) >= LARGE_C_WEIGHT_REUSE_MIN_CHANNEL_SIZE) ||
+        (static_cast<uint64_t>(innerSize) <= LARGE_L_SPLIT_C_WEIGHT_REUSE_MAX_INNER_SIZE &&
+         static_cast<uint64_t>(channelSize) <= LARGE_L_SPLIT_C_WEIGHT_REUSE_MAX_CHANNEL_SIZE &&
          static_cast<uint64_t>(channelSize) >= LARGE_C_WEIGHT_REUSE_MIN_CHANNEL_SIZE);
     if (preferWeightReuseByRow && channelSize > 1 && batchSize > 0) {
         OP_CHECK_IF(
