@@ -34,13 +34,10 @@ MINIMAL_CASE_MATRIX = [
 
 BALANCED_SHAPES = [
     # shape_tag,             x_shape,       weight_type,   weight_shape, note
-    ("2d_scalar_short_tail", [1, 17],       "scalar",      [1],          "scalar + DataCopyPad tail"),
-    ("2d_scalar_aligned",    [8, 32],       "scalar",      [1],          "scalar aligned"),
-    ("2d_scalar_tail",       [8, 3, 33],    "scalar",      [1],          "scalar rank3 tail"),
-    ("2d_pc_inner32",        [2, 3, 32],    "per_channel", [3],          "per-channel Duplicate branch"),
-    ("3d_pc_inner33_tail",   [2, 3, 33],    "per_channel", [3],          "per-channel unaligned total tail"),
-    ("4d_pc_inner35",        [1, 4, 5, 7],  "per_channel", [4],          "rank4 per-channel SetValue branch"),
-    ("2d_pc_tail",           [2, 33],       "per_channel", [33],         "dim1 per-channel tail"),
+    ("scalar_len7",          [7],           "scalar",      [1],          "scalar weight [1] short tail"),
+    ("pc_128_512_127",       [128, 512, 127], "per_channel", [512],       "channel weight [512], odd inner 127"),
+    ("pc_64_512_1",          [64, 512, 1],  "per_channel", [512],        "channel weight [512], inner size 1"),
+    ("pc_1_512_4096",        [1, 512, 4096], "per_channel", [512],       "channel weight [512], large aligned inner"),
 ]
 
 STRESS_CASE_MATRIX = [

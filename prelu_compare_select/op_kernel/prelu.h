@@ -73,9 +73,9 @@ private:
     int64_t innerSize = 1;
 };
 
-__aicore__ inline float LoadBf16ScalarAsFloat(GM_ADDR weight)
+__aicore__ inline float ToFloat(const bfloat16_t& bVal)
 {
-    uint16_t weightBits = *((__gm__ uint16_t*)weight);
+    uint16_t weightBits = *reinterpret_cast<const uint16_t*>(&bVal);
     uint32_t floatBits = static_cast<uint32_t>(weightBits) << 16;
     return *reinterpret_cast<float*>(&floatBits);
 }
@@ -112,7 +112,7 @@ __aicore__ inline void Prelu<T, schMode>::Init(
 
     if constexpr (std::is_same_v<T, bfloat16_t>) {
         T scalarWeight = *((__gm__ T*)weight);
-        weightValFp32 =  AscendC::Cast(scalarWeight);
+        weightValFp32 = ToFloat(scalarWeight);
     } else {
         T scalarWeight = *((__gm__ T*)weight);
         weightVal = scalarWeight;
@@ -156,7 +156,7 @@ template <typename T, uint32_t schMode>
 __aicore__ inline float Prelu<T, schMode>::LoadWeightFp32(int64_t weightOffset)
 {
     if constexpr (std::is_same_v<T, bfloat16_t>) {
-        return AscendC::Cast(inputGMWeight.GetValue(weightOffset));
+        return ToFloat(inputGMWeight.GetValue(weightOffset));
     } else {
         return static_cast<float>(inputGMWeight.GetValue(weightOffset));
     }
@@ -172,7 +172,7 @@ __aicore__ inline void Prelu<T, schMode>::ComputeScalar(uint32_t currentNum, Loc
         LocalTensor<uint8_t> mask = tmpBufMask.Get<uint8_t>();
         Cast(xFp32, xLocal, RoundMode::CAST_NONE, currentNum);
         Muls(prod, xFp32, weightValFp32, compareLength);
-        Compares(mask, xFp32, 0.0f, CMPMODE::GT, compareLength);
+        CompareScalar(mask, xFp32, 0.0f, CMPMODE::GT, compareLength);
         Select(xFp32, mask, xFp32, prod, SELMODE::VSEL_TENSOR_TENSOR_MODE, compareLength);
         Cast(yLocal, xFp32, RoundMode::CAST_RINT, currentNum);
     } else {
@@ -180,7 +180,7 @@ __aicore__ inline void Prelu<T, schMode>::ComputeScalar(uint32_t currentNum, Loc
         LocalTensor<T> prod = tmpBufProd.Get<T>();
         LocalTensor<uint8_t> mask = tmpBufMask.Get<uint8_t>();
         Muls(prod, xLocal, weightVal, compareLength);
-        Compares(mask, xLocal, static_cast<T>(0), CMPMODE::GT, compareLength);
+        CompareScalar(mask, xLocal, static_cast<T>(0), CMPMODE::GT, compareLength);
         Select(yLocal, mask, xLocal, prod, SELMODE::VSEL_TENSOR_TENSOR_MODE, compareLength);
     }
 }
