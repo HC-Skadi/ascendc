@@ -346,6 +346,7 @@ __aicore__ inline void Prelu<T>::InitChannelNcSplitCWeightReuse(
     int64_t blockIdx = GetBlockIdx();
     channelSize = tilingData->channelSize;
     innerSize = tilingData->innerSize;
+    totalLength = tilingData->totalLength;
     cTileLength = tilingData->tileLength;
     ubLength = innerSize == 1 ? tilingData->tileLength : tilingData->innerSizeAligned;
     alignedChannelSize = tilingData->innerSizeAligned;
@@ -673,10 +674,12 @@ template <typename T>
 __aicore__ inline void Prelu<T>::ProcessChannelNcSplitCWeightReuse()
 {
     uint32_t alignElements = static_cast<uint32_t>(32U / sizeof(T));
+    int64_t batchSize = totalLength / (channelSize * innerSize);
+    int64_t lastCTileIdx = -1;
     for (int64_t taskProgress = 0; taskProgress < taskNum; ++taskProgress) {
         int64_t taskIdx = taskOffset + taskProgress;
-        int64_t nIdx = taskIdx / tilesPerRow;
-        int64_t cTileIdx = taskIdx % tilesPerRow;
+        int64_t cTileIdx = taskIdx / batchSize;
+        int64_t nIdx = taskIdx % batchSize;
         int64_t cTileChannels = innerSize == 1 ? alignedChannelSize : cTileLength;
         int64_t cOffset = cTileIdx * cTileChannels;
         int64_t remainC = channelSize - cOffset;
@@ -687,9 +690,12 @@ __aicore__ inline void Prelu<T>::ProcessChannelNcSplitCWeightReuse()
         uint32_t weightLen = innerSize == 1 ? computeLen : AlignUp(realC, alignElements);
         int64_t gmOffset = nIdx * channelSize * innerSize + cOffset * innerSize;
 
-        CopyWeightTile(cOffset, realC, weightLen);
+        if (cTileIdx != lastCTileIdx) {
+            CopyWeightTile(cOffset, realC, weightLen);
+            BuildNcWeightVec(1);
+            lastCTileIdx = cTileIdx;
+        }
         CopyInByOffset(gmOffset, realLen, computeLen);
-        BuildNcWeightVec(1);
         ComputeNc(computeLen);
         CopyOutByOffset(gmOffset, realLen);
     }
