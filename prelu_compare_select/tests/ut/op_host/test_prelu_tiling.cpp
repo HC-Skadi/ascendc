@@ -32,7 +32,8 @@ struct PreluTestParam {
 };
 
 static PreluTestParam testCases[] = {
-    {"prelu_0", {7}, ge::DT_FLOAT, ge::FORMAT_ND, {1}, ge::DT_FLOAT, ge::FORMAT_ND, {7}, ge::DT_FLOAT, ge::FORMAT_ND, "Ascend910B", ge::GRAPH_SUCCESS, 0UL, "7 1 0 128 1 7 12416 ", {0}, 64, 262144, 4096},
+    {"prelu_0", {7}, ge::DT_FLOAT, ge::FORMAT_ND, {1}, ge::DT_FLOAT, ge::FORMAT_ND, {7}, ge::DT_FLOAT, ge::FORMAT_ND, "Ascend910B", ge::GRAPH_SUCCESS, 0UL, "7 1 0 128 1 7 12416 0 1 1 7 1 ", {0}, 64, 262144, 4096},
+    {"prelu_channel", {128, 512, 127}, ge::DT_FLOAT, ge::FORMAT_ND, {512}, ge::DT_FLOAT, ge::FORMAT_ND, {128, 512, 127}, ge::DT_FLOAT, ge::FORMAT_ND, "Ascend910B", ge::GRAPH_SUCCESS, 1UL, "8323072 64 63 130048 1 130048 12416 1 128 512 127 512 ", {0}, 64, 262144, 4096},
 };
 
 class PreluTilingTest : public testing::TestWithParam<PreluTestParam> {

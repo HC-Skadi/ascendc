@@ -34,7 +34,7 @@ __aicore__ inline void CopyLocalToGmPad(const GlobalTensor<T>& dst, const LocalT
     DataCopyPad(dst, src, copyParams);
 }
 
-template <typename T>
+template <typename T, uint32_t schMode>
 class Prelu {
 public:
     __aicore__ inline Prelu() {}
@@ -45,7 +45,11 @@ public:
 private:
     __aicore__ inline void CopyIn(int64_t progress, uint32_t currentNum);
     __aicore__ inline void CopyOut(int64_t progress, uint32_t currentNum);
-    __aicore__ inline void Compute(uint32_t currentNum);
+    __aicore__ inline void Compute(int64_t progress, uint32_t currentNum);
+    __aicore__ inline void ComputeScalar(uint32_t currentNum, LocalTensor<T>& xLocal, LocalTensor<T>& yLocal);
+    __aicore__ inline void ComputeChannel(int64_t progress, uint32_t currentNum, LocalTensor<T>& xLocal, LocalTensor<T>& yLocal);
+    __aicore__ inline T LoadWeight(int64_t weightOffset);
+    __aicore__ inline float LoadWeightFp32(int64_t weightOffset);
 
 private:
     TPipe* pipe_ = nullptr;
@@ -53,15 +57,20 @@ private:
     TQue<QuePosition::VECOUT, BUFFER_NUM> outputQueueY;
     TBuf<TPosition::VECCALC> tmpXFp32;
     TBuf<TPosition::VECCALC> tmpBufProd;
+    TBuf<TPosition::VECCALC> tmpBufPos;
     TBuf<TPosition::VECCALC> tmpBufMask;
 
     GlobalTensor<T> inputGMX;
+    GlobalTensor<T> inputGMWeight;
     GlobalTensor<T> outputGMY;
 
     T weightVal;
     float weightValFp32 = 0.0f;
+    int64_t blockOffset = 0;
     int64_t blockLength = 0;
     int64_t ubLength = 0;
+    int64_t channelSize = 1;
+    int64_t innerSize = 1;
 };
 
 __aicore__ inline float LoadBf16ScalarAsFloat(GM_ADDR weight)
@@ -79,13 +88,13 @@ __aicore__ inline uint32_t AlignCompareLength(uint32_t currentNum)
     return ((currentNum + alignElements - 1U) / alignElements) * alignElements;
 }
 
-template <typename T>
-__aicore__ inline void Prelu<T>::Init(
+template <typename T, uint32_t schMode>
+__aicore__ inline void Prelu<T, schMode>::Init(
     GM_ADDR x, GM_ADDR weight, GM_ADDR y, const PreluTilingData* tilingData, TPipe* pipe)
 {
     pipe_ = pipe;
     int64_t blockIdx = GetBlockIdx();
-    int64_t blockOffset = blockIdx * tilingData->formerLength;
+    blockOffset = blockIdx * tilingData->formerLength;
     if (blockIdx < tilingData->formerNum) {
         blockLength = tilingData->formerLength;
     } else if (blockIdx < tilingData->usedCoreNum) {
@@ -94,8 +103,11 @@ __aicore__ inline void Prelu<T>::Init(
         blockLength = 0;
     }
     ubLength = tilingData->tileLength;
+    channelSize = tilingData->channelSize > 0 ? tilingData->channelSize : 1;
+    innerSize = tilingData->innerSize > 0 ? tilingData->innerSize : 1;
 
     inputGMX.SetGlobalBuffer((__gm__ T*)x + blockOffset, blockLength);
+    inputGMWeight.SetGlobalBuffer((__gm__ T*)weight, tilingData->weightSize);
     outputGMY.SetGlobalBuffer((__gm__ T*)y + blockOffset, blockLength);
 
     if constexpr (std::is_same_v<T, bfloat16_t>) {
@@ -111,34 +123,48 @@ __aicore__ inline void Prelu<T>::Init(
     if constexpr (std::is_same_v<T, bfloat16_t>) {
         pipe_->InitBuffer(tmpXFp32, ubLength * sizeof(float));
         pipe_->InitBuffer(tmpBufProd, ubLength * sizeof(float));
+        pipe_->InitBuffer(tmpBufPos, ubLength * sizeof(float));
     } else {
         pipe_->InitBuffer(tmpBufProd, ubLength * sizeof(T));
     }
     pipe_->InitBuffer(tmpBufMask, ubLength * sizeof(uint8_t));
 }
 
-template <typename T>
-__aicore__ inline void Prelu<T>::CopyIn(int64_t progress, uint32_t currentNum)
+template <typename T, uint32_t schMode>
+__aicore__ inline void Prelu<T, schMode>::CopyIn(int64_t progress, uint32_t currentNum)
 {
     LocalTensor<T> xLocal = inputQueueX.AllocTensor<T>();
     CopyGmToLocalPad(xLocal, inputGMX[progress * ubLength], currentNum);
     inputQueueX.EnQue(xLocal);
 }
 
-template <typename T>
-__aicore__ inline void Prelu<T>::CopyOut(int64_t progress, uint32_t currentNum)
+template <typename T, uint32_t schMode>
+__aicore__ inline void Prelu<T, schMode>::CopyOut(int64_t progress, uint32_t currentNum)
 {
     LocalTensor<T> yLocal = outputQueueY.DeQue<T>();
     CopyLocalToGmPad(outputGMY[progress * ubLength], yLocal, currentNum);
     outputQueueY.FreeTensor(yLocal);
 }
 
-template <typename T>
-__aicore__ inline void Prelu<T>::Compute(uint32_t currentNum)
+template <typename T, uint32_t schMode>
+__aicore__ inline T Prelu<T, schMode>::LoadWeight(int64_t weightOffset)
 {
-    LocalTensor<T> xLocal = inputQueueX.DeQue<T>();
-    LocalTensor<T> yLocal = outputQueueY.AllocTensor<T>();
+    return inputGMWeight.GetValue(weightOffset);
+}
 
+template <typename T, uint32_t schMode>
+__aicore__ inline float Prelu<T, schMode>::LoadWeightFp32(int64_t weightOffset)
+{
+    if constexpr (std::is_same_v<T, bfloat16_t>) {
+        return AscendC::Cast(inputGMWeight.GetValue(weightOffset));
+    } else {
+        return static_cast<float>(inputGMWeight.GetValue(weightOffset));
+    }
+}
+
+template <typename T, uint32_t schMode>
+__aicore__ inline void Prelu<T, schMode>::ComputeScalar(uint32_t currentNum, LocalTensor<T>& xLocal, LocalTensor<T>& yLocal)
+{
     if constexpr (std::is_same_v<T, bfloat16_t>) {
         uint32_t compareLength = AlignCompareLength<float>(currentNum);
         LocalTensor<float> xFp32 = tmpXFp32.Get<float>();
@@ -157,19 +183,78 @@ __aicore__ inline void Prelu<T>::Compute(uint32_t currentNum)
         Compares(mask, xLocal, static_cast<T>(0), CMPMODE::GT, compareLength);
         Select(yLocal, mask, xLocal, prod, SELMODE::VSEL_TENSOR_TENSOR_MODE, compareLength);
     }
+}
+
+template <typename T, uint32_t schMode>
+__aicore__ inline void Prelu<T, schMode>::ComputeChannel(
+    int64_t progress, uint32_t currentNum, LocalTensor<T>& xLocal, LocalTensor<T>& yLocal)
+{
+    uint32_t localOffset = 0;
+    if constexpr (std::is_same_v<T, bfloat16_t>) {
+        LocalTensor<float> xFp32 = tmpXFp32.Get<float>();
+        LocalTensor<float> prod = tmpBufProd.Get<float>();
+        LocalTensor<float> pos = tmpBufPos.Get<float>();
+        Cast(xFp32, xLocal, RoundMode::CAST_NONE, currentNum);
+        while (localOffset < currentNum) {
+            int64_t globalOffset = blockOffset + progress * ubLength + localOffset;
+            int64_t offsetInChannel = globalOffset % innerSize;
+            int64_t remainInChannel = innerSize - offsetInChannel;
+            int64_t remainInTile = static_cast<int64_t>(currentNum) - static_cast<int64_t>(localOffset);
+            uint32_t segmentLength = static_cast<uint32_t>(
+                remainInChannel < remainInTile ? remainInChannel : remainInTile);
+            int64_t weightOffset = (globalOffset / innerSize) % channelSize;
+            float weight = LoadWeightFp32(weightOffset);
+            Maxs(pos[localOffset], xFp32[localOffset], 0.0f, segmentLength);
+            Mins(prod[localOffset], xFp32[localOffset], 0.0f, segmentLength);
+            Muls(prod[localOffset], prod[localOffset], weight, segmentLength);
+            Add(xFp32[localOffset], pos[localOffset], prod[localOffset], segmentLength);
+            localOffset += segmentLength;
+        }
+        Cast(yLocal, xFp32, RoundMode::CAST_RINT, currentNum);
+    } else {
+        LocalTensor<T> prod = tmpBufProd.Get<T>();
+        while (localOffset < currentNum) {
+            int64_t globalOffset = blockOffset + progress * ubLength + localOffset;
+            int64_t offsetInChannel = globalOffset % innerSize;
+            int64_t remainInChannel = innerSize - offsetInChannel;
+            int64_t remainInTile = static_cast<int64_t>(currentNum) - static_cast<int64_t>(localOffset);
+            uint32_t segmentLength = static_cast<uint32_t>(
+                remainInChannel < remainInTile ? remainInChannel : remainInTile);
+            int64_t weightOffset = (globalOffset / innerSize) % channelSize;
+            T weight = LoadWeight(weightOffset);
+            Maxs(yLocal[localOffset], xLocal[localOffset], static_cast<T>(0), segmentLength);
+            Mins(prod[localOffset], xLocal[localOffset], static_cast<T>(0), segmentLength);
+            Muls(prod[localOffset], prod[localOffset], weight, segmentLength);
+            Add(yLocal[localOffset], yLocal[localOffset], prod[localOffset], segmentLength);
+            localOffset += segmentLength;
+        }
+    }
+}
+
+template <typename T, uint32_t schMode>
+__aicore__ inline void Prelu<T, schMode>::Compute(int64_t progress, uint32_t currentNum)
+{
+    LocalTensor<T> xLocal = inputQueueX.DeQue<T>();
+    LocalTensor<T> yLocal = outputQueueY.AllocTensor<T>();
+
+    if constexpr (schMode == PRELU_TPL_SCH_MODE_CHANNEL) {
+        ComputeChannel(progress, currentNum, xLocal, yLocal);
+    } else {
+        ComputeScalar(currentNum, xLocal, yLocal);
+    }
 
     outputQueueY.EnQue<T>(yLocal);
     inputQueueX.FreeTensor(xLocal);
 }
 
-template <typename T>
-__aicore__ inline void Prelu<T>::Process()
+template <typename T, uint32_t schMode>
+__aicore__ inline void Prelu<T, schMode>::Process()
 {
     int64_t tileNum = (blockLength + ubLength - 1) / ubLength;
     for (int64_t i = 0; i < tileNum; ++i) {
         uint32_t currentNum = static_cast<uint32_t>((i == tileNum - 1) ? (blockLength - i * ubLength) : ubLength);
         CopyIn(i, currentNum);
-        Compute(currentNum);
+        Compute(i, currentNum);
         CopyOut(i, currentNum);
     }
 }

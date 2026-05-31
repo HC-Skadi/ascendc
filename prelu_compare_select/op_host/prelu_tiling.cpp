@@ -19,6 +19,8 @@ constexpr uint32_t WS_SYS_SIZE = 0U;
 constexpr uint32_t BLOCK_SIZE = 32U;
 constexpr uint32_t CORE_ALIGN_SIZE = 512U;
 constexpr uint64_t UB_RESERVED_SIZE = 1024U;
+constexpr int64_t WEIGHT_MODE_SCALAR = 0;
+constexpr int64_t WEIGHT_MODE_CHANNEL = 1;
 
 static ge::graphStatus GetPlatformInfo(gert::TilingContext* context, uint64_t& ubSize, int64_t& coreNum)
 {
@@ -41,17 +43,55 @@ static ge::graphStatus GetWorkspaceSize(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus CheckScalarWeight(gert::TilingContext* context)
+static int64_t GetShapeSize(const gert::Shape& shape, size_t begin, size_t end)
 {
+    int64_t size = 1;
+    for (size_t i = begin; i < end; ++i) {
+        size *= shape.GetDim(i);
+    }
+    return size;
+}
+
+static ge::graphStatus GetWeightShapeInfo(
+    gert::TilingContext* context, int64_t& weightMode, int64_t& outerSize, int64_t& channelSize, int64_t& innerSize,
+    int64_t& weightSize)
+{
+    auto inputX = context->GetInputShape(0);
+    OP_CHECK_NULL_WITH_CONTEXT(context, inputX);
     auto weightShape = context->GetInputShape(1);
     OP_CHECK_NULL_WITH_CONTEXT(context, weightShape);
-    auto storageShape = weightShape->GetStorageShape();
+
+    auto xShape = inputX->GetStorageShape();
+    auto wShape = weightShape->GetStorageShape();
     OP_CHECK_IF(
-        storageShape.GetDimNum() != 1 || storageShape.GetDim(0) != 1,
-        OP_LOGE(
-            context, "Prelu: only scalar weight with shape [1] is supported, got dim num %zu, dim0 %ld",
-            storageShape.GetDimNum(), storageShape.GetDimNum() == 0 ? 0 : storageShape.GetDim(0)),
+        wShape.GetDimNum() != 1,
+        OP_LOGE(context, "Prelu: weight must be 1-D, got dim num %zu", wShape.GetDimNum()),
         return ge::GRAPH_FAILED);
+
+    weightSize = wShape.GetDim(0);
+    OP_CHECK_IF(weightSize <= 0, OP_LOGE(context, "Prelu: weight size must be positive"), return ge::GRAPH_FAILED);
+
+    if (weightSize == 1) {
+        weightMode = WEIGHT_MODE_SCALAR;
+        outerSize = 1;
+        channelSize = 1;
+        innerSize = xShape.GetShapeSize();
+        return ge::GRAPH_SUCCESS;
+    }
+
+    OP_CHECK_IF(
+        xShape.GetDimNum() < 2,
+        OP_LOGE(context, "Prelu: channel weight requires x rank >= 2, got rank %zu", xShape.GetDimNum()),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        weightSize != xShape.GetDim(1),
+        OP_LOGE(context, "Prelu: channel weight size %ld must match x dim1 %ld", weightSize, xShape.GetDim(1)),
+        return ge::GRAPH_FAILED);
+
+    weightMode = WEIGHT_MODE_CHANNEL;
+    outerSize = GetShapeSize(xShape, 0, 1);
+    channelSize = xShape.GetDim(1);
+    innerSize = GetShapeSize(xShape, 2, xShape.GetDimNum());
     return ge::GRAPH_SUCCESS;
 }
 
@@ -104,7 +144,7 @@ static uint64_t GetBufferBytesPerElement(ge::DataType dataType)
     if (dataType == ge::DT_FLOAT16) {
         return 11U;
     }
-    return 17U;
+    return 21U;
 }
 
 static uint64_t GetCompareAlignElementNum(ge::DataType dataType, uint32_t typeLength)
@@ -120,7 +160,8 @@ static uint64_t CeilDiv(uint64_t value, uint64_t factor)
 
 static ge::graphStatus CalcTiling(
     gert::TilingContext* context, uint64_t ubSize, int64_t coreNum, int64_t totalNum, ge::DataType dataType,
-    uint32_t typeLength, PreluTilingData* tiling, uint32_t& usedCoreNum)
+    uint32_t typeLength, int64_t weightMode, int64_t outerSize, int64_t channelSize, int64_t innerSize,
+    int64_t weightSize, PreluTilingData* tiling, uint32_t& usedCoreNum)
 {
     uint64_t bufferBytesPerElement = GetBufferBytesPerElement(dataType);
     uint64_t usableUbSize = (ubSize > UB_RESERVED_SIZE) ? (ubSize - UB_RESERVED_SIZE) : ubSize;
@@ -157,6 +198,11 @@ static ge::graphStatus CalcTiling(
     tiling->tailNum = static_cast<int64_t>(tailNum);
     tiling->tailLength = static_cast<int64_t>(tailLength);
     tiling->tileLength = static_cast<int64_t>(ubFactor);
+    tiling->weightMode = weightMode;
+    tiling->outerSize = outerSize;
+    tiling->channelSize = channelSize;
+    tiling->innerSize = innerSize;
+    tiling->weightSize = weightSize;
     usedCoreNum = static_cast<uint32_t>(finalCoreNum);
     return ge::GRAPH_SUCCESS;
 }
@@ -175,11 +221,6 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
         OP_LOGE(context, "GetWorkspaceSize error"),
         return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(
-        CheckScalarWeight(context) != ge::GRAPH_SUCCESS,
-        OP_LOGE(context, "CheckScalarWeight error"),
-        return ge::GRAPH_FAILED);
-
     int64_t totalNum = 0;
     ge::DataType dataType = ge::DT_FLOAT;
     uint32_t typeLength = 0;
@@ -188,18 +229,31 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
         OP_LOGE(context, "GetShapeAndDtypeInfo error"),
         return ge::GRAPH_FAILED);
 
+    int64_t weightMode = WEIGHT_MODE_SCALAR;
+    int64_t outerSize = 1;
+    int64_t channelSize = 1;
+    int64_t innerSize = 1;
+    int64_t weightSize = 1;
+    OP_CHECK_IF(
+        GetWeightShapeInfo(context, weightMode, outerSize, channelSize, innerSize, weightSize) != ge::GRAPH_SUCCESS,
+        OP_LOGE(context, "GetWeightShapeInfo error"),
+        return ge::GRAPH_FAILED);
+
     PreluTilingData* tiling = context->GetTilingData<PreluTilingData>();
     OP_CHECK_NULL_WITH_CONTEXT(context, tiling);
 
     uint32_t usedCoreNum = 1;
     OP_CHECK_IF(
-        CalcTiling(context, ubSize, coreNum, totalNum, dataType, typeLength, tiling, usedCoreNum) != ge::GRAPH_SUCCESS,
+        CalcTiling(
+            context, ubSize, coreNum, totalNum, dataType, typeLength, weightMode, outerSize, channelSize, innerSize,
+            weightSize, tiling, usedCoreNum) != ge::GRAPH_SUCCESS,
         OP_LOGE(context, "CalcTiling error"),
         return ge::GRAPH_FAILED);
 
     context->SetBlockDim(usedCoreNum);
 
-    uint64_t tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_SCH_MODE_0);
+    uint64_t tilingKey = GET_TPL_TILING_KEY(
+        weightMode == WEIGHT_MODE_CHANNEL ? PRELU_TPL_SCH_MODE_CHANNEL : PRELU_TPL_SCH_MODE_SCALAR);
     context->SetTilingKey(tilingKey);
     return ge::GRAPH_SUCCESS;
 }
