@@ -172,6 +172,17 @@ static uint64_t GetNcWeightReuseBufferBytesPerElement(ge::DataType dataType)
     return 24U;
 }
 
+static uint64_t GetNcResidentWeightBufferBytesPerElement(ge::DataType dataType)
+{
+    if (dataType == ge::DT_FLOAT) {
+        return 28U;
+    }
+    if (dataType == ge::DT_FLOAT16) {
+        return 14U;
+    }
+    return 24U;
+}
+
 static uint64_t GetNcWeightCacheBytesPerElement(ge::DataType dataType, uint32_t typeLength)
 {
     uint64_t bytes = typeLength;
@@ -203,11 +214,12 @@ static ge::graphStatus CalcTiling(
     gert::TilingContext* context, uint64_t ubSize, int64_t coreNum, int64_t totalNum, ge::DataType dataType,
     uint32_t typeLength, int64_t weightMode, int64_t channelSize, int64_t innerSize, int64_t rowNum,
     PreluTilingData* tiling, uint32_t& usedCoreNum, bool& useSplitLParallel, bool& useNcWeightReuse,
-    bool& useNcSplitCWeightReuse)
+    bool& useNcSplitCWeightReuse, bool& useNcResidentWeightReuse)
 {
     useSplitLParallel = false;
     useNcWeightReuse = false;
     useNcSplitCWeightReuse = false;
+    useNcResidentWeightReuse = false;
     uint64_t bufferBytesPerElement = GetBufferBytesPerElement(dataType);
     uint64_t usableUbSize = (ubSize > UB_RESERVED_SIZE) ? (ubSize - UB_RESERVED_SIZE) : ubSize;
     uint64_t blockElementNum = BLOCK_SIZE / typeLength;
@@ -291,10 +303,13 @@ static ge::graphStatus CalcTiling(
         bool weightCacheSizeValid = alignedChannelSize <=
             std::numeric_limits<uint64_t>::max() / weightCacheBytesPerElement;
         uint64_t weightCacheBytes = weightCacheSizeValid ? alignedChannelSize * weightCacheBytesPerElement : 0U;
+        uint64_t ncResidentWeightCacheBytes = dataType == ge::DT_BF16 ? weightCacheBytes : 0U;
         if (weightCacheSizeValid && weightCacheBytes < usableUbSize) {
+            uint64_t ncBufferBytesPerElement = innerSize == 1 ?
+                GetNcResidentWeightBufferBytesPerElement(dataType) : GetNcWeightReuseBufferBytesPerElement(dataType);
+            uint64_t ncWeightCacheBytes = innerSize == 1 ? ncResidentWeightCacheBytes : weightCacheBytes;
             uint64_t ncMaxTileElements =
-                ((usableUbSize - weightCacheBytes) / GetNcWeightReuseBufferBytesPerElement(dataType) /
-                 alignedRowElements) *
+                ((usableUbSize - ncWeightCacheBytes) / ncBufferBytesPerElement / alignedRowElements) *
                 alignedRowElements;
             if (ncMaxTileElements >= alignedRowElements) {
                 uint64_t finalCoreNum = std::min(coreLimit, batchSize);
@@ -304,7 +319,9 @@ static ge::graphStatus CalcTiling(
                 tiling->baseRows = static_cast<int64_t>(batchSize / finalCoreNum);
                 tiling->extraRows = static_cast<int64_t>(batchSize % finalCoreNum);
                 usedCoreNum = static_cast<uint32_t>(finalCoreNum);
-                useNcWeightReuse = true;
+                bool isResidentWeightReuse = innerSize == 1;
+                useNcResidentWeightReuse = isResidentWeightReuse;
+                useNcWeightReuse = !isResidentWeightReuse;
                 return ge::GRAPH_SUCCESS;
             }
         }
@@ -468,9 +485,11 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
     bool useSplitLParallel = false;
     bool useNcWeightReuse = false;
     bool useNcSplitCWeightReuse = false;
+    bool useNcResidentWeightReuse = false;
     OP_CHECK_IF(
         CalcTiling(context, ubSize, coreNum, totalNum, dataType, typeLength, weightMode, channelSize, innerSize,
-            rowNum, tiling, usedCoreNum, useSplitLParallel, useNcWeightReuse, useNcSplitCWeightReuse) !=
+            rowNum, tiling, usedCoreNum, useSplitLParallel, useNcWeightReuse, useNcSplitCWeightReuse,
+            useNcResidentWeightReuse) !=
             ge::GRAPH_SUCCESS,
         OP_LOGE(context, "CalcTiling error"),
         return ge::GRAPH_FAILED);
@@ -479,7 +498,9 @@ static ge::graphStatus PreluTilingFunc(gert::TilingContext* context)
 
     uint64_t tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_SCALAR_MODE);
     if (weightMode == 1) {
-        if (useNcWeightReuse) {
+        if (useNcResidentWeightReuse) {
+            tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_NC_RESIDENT_WEIGHT_MODE);
+        } else if (useNcWeightReuse) {
             tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_NC_WEIGHT_REUSE_MODE);
         } else if (useNcSplitCWeightReuse) {
             tilingKey = GET_TPL_TILING_KEY(PRELU_TPL_CHANNEL_NC_SPLIT_C_WEIGHT_REUSE_MODE);
