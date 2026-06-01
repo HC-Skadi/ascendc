@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 
-ROOT = Path("/home/ma-user/work/ascendc/ascendoptest/prelu")  
+ROOT = Path(__file__).resolve().parents[1]
 CASE_DIR = ROOT / "cases"
 GOLDEN_FILE = ROOT / "golden/prelu_expect.py"
 
@@ -20,6 +20,80 @@ SCENARIO = {
     "x_range": [-10.0, 10.0],
     "weight_range": [-5.0, 5.0],
 }
+
+RANK_SWEEP_CASES = [
+    # case_id, x_shape, weight_type, weight_shape, note
+    ("1", [7], "scalar", [1], "fp32 scalar rank1"),
+    ("2", [13], "scalar", [1], "fp16 scalar rank1"),
+    ("3", [61], "scalar", [1], "bf16 scalar rank1"),
+    ("4", [12, 7], "per_channel", [7], "fp32 channel rank2"),
+    ("5", [9, 25], "scalar", [1], "fp16 scalar rank2"),
+    ("6", [33, 11], "per_channel", [11], "bf16 channel rank2"),
+    ("7", [16, 3, 7], "per_channel", [3], "fp32 channel rank3"),
+    ("8", [5, 13, 19], "scalar", [1], "fp16 scalar rank3"),
+    ("9", [31, 8, 15], "per_channel", [8], "bf16 channel rank3"),
+    ("10", [8, 17, 21, 5], "per_channel", [17], "fp32 channel rank4"),
+    ("11", [37, 3, 11, 9], "scalar", [1], "fp16 scalar rank4"),
+    ("12", [23, 19, 13, 7], "per_channel", [19], "bf16 channel rank4"),
+    ("13", [15, 12, 8, 6, 4], "per_channel", [12], "fp32 channel rank5"),
+    ("14", [2, 5, 7, 11, 13], "scalar", [1], "fp16 scalar rank5"),
+    ("15", [17, 3, 5, 9, 15], "per_channel", [3], "bf16 channel rank5"),
+    ("16", [9, 22, 13, 7, 5, 3], "per_channel", [22], "fp32 channel rank6"),
+    ("17", [19, 3, 8, 11, 5, 2], "scalar", [1], "fp16 scalar rank6"),
+    ("18", [31, 7, 4, 9, 2, 6], "per_channel", [7], "bf16 channel rank6"),
+    ("19", [12, 5, 11, 3, 7, 13, 2], "per_channel", [5], "fp32 channel rank7"),
+    ("20", [5, 13, 17, 2, 9, 4, 3], "scalar", [1], "fp16 scalar rank7"),
+    ("21", [23, 3, 8, 5, 11, 2, 7], "per_channel", [3], "bf16 channel rank7"),
+    ("22", [7, 11, 3, 5, 13, 2, 9, 4], "per_channel", [11], "fp32 channel rank8"),
+    ("23", [3, 7, 2, 11, 5, 13, 4, 6], "scalar", [1], "fp16 scalar rank8"),
+    ("24", [11, 3, 5, 7, 13, 2, 9, 4], "per_channel", [3], "bf16 channel rank8"),
+    ("25", [128, 257], "per_channel", [257], "fp32 channel rank2"),
+    ("26", [23, 97], "scalar", [1], "fp16 scalar rank2"),
+    ("27", [61, 73], "per_channel", [73], "bf16 channel rank2"),
+    ("28", [13, 47, 19], "per_channel", [47], "fp32 channel rank3"),
+    ("29", [5, 31, 71], "scalar", [1], "fp16 scalar rank3"),
+    ("30", [43, 7, 29], "per_channel", [7], "bf16 channel rank3"),
+    ("31", [17, 23, 41, 8], "per_channel", [23], "fp32 channel rank4"),
+    ("32", [31, 13, 9, 6], "scalar", [1], "fp16 scalar rank4"),
+    ("33", [7, 19, 37, 11], "per_channel", [19], "bf16 channel rank4"),
+    ("34", [3, 5, 11, 17, 6], "per_channel", [5], "fp32 channel rank5"),
+    ("35", [11, 2, 13, 7, 19], "scalar", [1], "fp16 scalar rank5"),
+    ("36", [29, 3, 5, 8, 13], "per_channel", [3], "bf16 channel rank5"),
+    ("37", [13, 5, 9, 3, 7, 11], "per_channel", [5], "fp32 channel rank6"),
+    ("38", [17, 2, 11, 5, 3, 8], "scalar", [1], "fp16 scalar rank6"),
+    ("39", [19, 7, 13, 4, 9, 2], "per_channel", [7], "bf16 channel rank6"),
+    ("40", [3, 5, 7, 2, 11, 13, 4], "per_channel", [5], "fp32 channel rank7"),
+    ("41", [5, 3, 11, 7, 13, 2, 9], "scalar", [1], "fp16 scalar rank7"),
+    ("42", [7, 11, 2, 5, 13, 3, 8], "per_channel", [11], "bf16 channel rank7"),
+    ("43", [2, 3, 5, 7, 11, 13, 4, 6], "per_channel", [3], "fp32 channel rank8"),
+    ("44", [3, 2, 7, 5, 11, 13, 4, 9], "scalar", [1], "fp16 scalar rank8"),
+    ("45", [5, 2, 3, 7, 11, 4, 6, 8], "per_channel", [2], "bf16 channel rank8"),
+    ("46", [1000, 999], "per_channel", [999], "fp32 channel rank2"),
+    ("47", [2049, 513], "scalar", [1], "fp16 scalar rank2"),
+    ("48", [767, 511], "per_channel", [511], "bf16 channel rank2"),
+    ("49", [100, 197, 31], "per_channel", [197], "fp32 channel rank3"),
+    ("50", [59, 43, 17], "scalar", [1], "fp16 scalar rank3"),
+    ("51", [4096, 2048], "per_channel", [2048], "fp32 channel rank2"),
+    ("52", [8192, 1024], "scalar", [1], "fp16 scalar rank2"),
+    ("53", [3072, 2049], "per_channel", [2049], "bf16 channel rank2"),
+    ("54", [128, 512, 127], "per_channel", [512], "fp32 channel rank3"),
+    ("55", [256, 128, 257], "scalar", [1], "fp16 scalar rank3"),
+]
+
+DTYPE_ALIAS = {
+    "fp16": "float16",
+    "fp32": "float32",
+    "bf16": "bfloat16",
+}
+
+
+def make_rank_sweep_matrix():
+    cases = []
+    for case_id, shape, weight_type, weight_shape, note in RANK_SWEEP_CASES:
+        dtype = DTYPE_ALIAS[note.split()[0]]
+        shape_tag = f"case_{int(case_id):03d}_rank{len(shape)}"
+        cases.append((dtype, shape_tag, shape, weight_type, weight_shape, SCENARIO["name"], note))
+    return cases
 
 MINIMAL_CASE_MATRIX = [
     # dtype,     shape_tag,             x_shape,     weight_type,   weight_shape, scenario,       note
@@ -148,6 +222,7 @@ CHANNEL_SCALAR_LARGE_SHAPES = [
 ]
 
 CASE_SUITES = {
+    "rank_sweep": make_rank_sweep_matrix(),
     "minimal": MINIMAL_CASE_MATRIX,
     "balanced": [
         (dtype, shape_tag, shape, weight_type, weight_shape, SCENARIO["name"], note)
@@ -196,6 +271,7 @@ CASE_SUITES = {
 
 CASE_SUITES["scaler"] = CASE_SUITES["scalar"]
 CASE_SUITES["scaler_large"] = CASE_SUITES["scalar_large"]
+CASE_SUITES["all_cases"] = CASE_SUITES["rank_sweep"]
 
 
 def make_tensor_desc(name, dtype, shape, value_range):
@@ -240,7 +316,7 @@ def make_case(expect_name, input_x_name, dtype, shape_tag, shape, weight_type, w
 
 
 def selected_cases():
-    suite_value = os.environ.get("CASE_SUITE") or os.environ.get("CASE_SUITES", "balanced")
+    suite_value = os.environ.get("CASE_SUITE") or os.environ.get("CASE_SUITES", "all_cases")
     suites = [suite.strip() for suite in suite_value.split(",") if suite.strip()]
     invalid_suites = [suite for suite in suites if suite not in CASE_SUITES]
     if invalid_suites:
