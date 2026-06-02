@@ -13,6 +13,7 @@ case_args=()
 if [[ "${1:-}" == "-n" ]]; then
     case_args=("-n" "${2:?error: -n requires a case name argument}")
 fi
+export LD_LIBRARY_PATH=/home/ma-user/Ascend/cann-8.5.0/tools/simulator/Ascend910B4/lib:$LD_LIBRARY_PATH 
 
 python3 "${ASCENDOPTEST_DIR}/run_test.py" \
   -i "${SUITE_DIR}/prototypes/prelu_custom.json" \

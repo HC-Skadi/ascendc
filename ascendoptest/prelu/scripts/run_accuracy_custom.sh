@@ -5,7 +5,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SUITE_DIR=$(cd "${SCRIPT_DIR}/.." && pwd)
 ASCENDOPTEST_DIR=$(cd "${SUITE_DIR}/.." && pwd)
 
-export ASCEND_CUSTOM_OPP_PATH="${ASCEND_CUSTOM_OPP_PATH:-/usr/local/Ascend/cann-9.0.0-beta.2/opp/vendors/prelu_nn}"
+# export ASCEND_CUSTOM_OPP_PATH="${ASCEND_CUSTOM_OPP_PATH:-/usr/local/Ascend/cann-9.0.0-beta.2/opp/vendors/prelu_nn}"
+export ASCEND_CUSTOM_OPP_PATH="/home/ma-user/Ascend/cann-9.0.0-beta.2/opp/vendors/prelu_nn"
 export LD_LIBRARY_PATH="${ASCEND_CUSTOM_OPP_PATH}/op_api/lib:${LD_LIBRARY_PATH:-}"
 
 case_args=()

@@ -5,14 +5,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SUITE_DIR=$(cd "${SCRIPT_DIR}/.." && pwd)
 ASCENDOPTEST_DIR=$(cd "${SUITE_DIR}/.." && pwd)
 # VENDORS_DIR="/usr/local/Ascend/cann-9.0.0-beta.2/opp/vendors"
-VENDORS_DIR="/home/ma-user/Ascend/cann-9.0.0-beta.2/opp/vendors"
+VENDORS_DIR="/home/ma-user/Ascend/cann-8.5.0/opp/vendors"
 CUSTOMIZE_DIR="${VENDORS_DIR}/prelu_nn"
-# CUSTOMIZE_BACKUP_DIR="${VENDORS_DIR}/prelu_nn.__builtin_perf_backup__"
-
-# case_args=()
-# if [[ "${1:-}" == "-n" ]]; then
-#     case_args=("-n" "${2:?error: -n requires a case name argument}")
-# fi
 
 # restore_customize_dir() {
 #   if [[ -d "${CUSTOMIZE_BACKUP_DIR}" && ! -e "${CUSTOMIZE_DIR}" ]]; then
@@ -31,10 +25,11 @@ CUSTOMIZE_DIR="${VENDORS_DIR}/prelu_nn"
 #   echo "Temporarily hiding deployed custom OPP to force builtin TBE baseline..."
 #   mv "${CUSTOMIZE_DIR}" "${CUSTOMIZE_BACKUP_DIR}"
 # fi
+export LD_LIBRARY_PATH=/home/ma-user/Ascend/cann-8.5.0/tools/simulator/Ascend910B4/lib:$LD_LIBRARY_PATH 
 
-if [ -f "/home/ma-user/Ascend/cann-9.0.0-beta.2/opp/vendors/prelu_nn/scripts/uninstall.sh" ]; then
-    bash "/home/ma-user/Ascend/cann-9.0.0-beta.2/opp/vendors/prelu_nn/scripts/uninstall.sh"
-fi
+bash /home/ma-user/Ascend/cann-9.0.0-beta.2/opp/vendors/prelu_nn/scripts/uninstall.sh || true
+
+
 
 python3 "${ASCENDOPTEST_DIR}/run_test.py" \
   -i "${SUITE_DIR}/prototypes/prelu_builtin.json" \
@@ -43,6 +38,7 @@ python3 "${ASCENDOPTEST_DIR}/run_test.py" \
   --op-type builtin \
   --msprof \
   --op \
+  --sim \
   -d "${SUITE_DIR}/prof/builtin" \
   --build \
   -k PRelu \
